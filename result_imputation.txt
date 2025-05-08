@@ -1,0 +1,9 @@
+imputation_test_Autoformer_ETTm1_ftM_sl96_ll48_pl96_dm512_nh8_el2_dl1_df2048_expand2_dc4_fc1_ebtimeF_dtTrue_test_0  
+mse:0.0787116214632988, mae:0.2014513909816742
+
+imputation_ETTh1_mask_0.125_TimesNet_ETTm1_ftM_sl96_ll0_pl0_dm16_nh8_el2_dl1_df32_expand2_dc4_fc3_ebtimeF_dtTrue_Exp_0  
+mse:0.026550954207777977, mae:0.10871286690235138
+
+imputation_ETTh1_mask_0.125_TimesNet_ETTm1_ftM_sl96_ll0_pl0_dm16_nh8_el2_dl1_df32_expand2_dc4_fc3_ebtimeF_dtTrue_Exp_0  
+mse:0.030605720356106758, mae:0.11565766483545303
+

@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "dayjs": "^1.11.13",
+    "dayjs-plugin-utc": "^0.1.2"
+  }
+}

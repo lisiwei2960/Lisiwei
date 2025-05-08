@@ -1,0 +1,13 @@
+prefix=e:/学习/基于大模型的电力负荷预测方法研究与开发/时间序列集合/.conda/Library
+exec_prefix=e:/学习/基于大模型的电力负荷预测方法研究与开发/时间序列集合/.conda/Library
+libdir=e:/学习/基于大模型的电力负荷预测方法研究与开发/时间序列集合/.conda/Library/lib
+sharedlibdir=e:/学习/基于大模型的电力负荷预测方法研究与开发/时间序列集合/.conda/Library/lib
+includedir=e:/学习/基于大模型的电力负荷预测方法研究与开发/时间序列集合/.conda/Library/include
+
+Name: zlib
+Description: zlib compression library
+Version: 1.2.13
+
+Requires:
+Libs: -L${libdir} -L${sharedlibdir} -lz
+Cflags: -I${includedir}
