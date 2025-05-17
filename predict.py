@@ -38,9 +38,9 @@ def get_args():
     # 模型定义
     parser.add_argument('--top_k', type=int, default=5, help='for TimesBlock')
     parser.add_argument('--num_kernels', type=int, default=6, help='for Inception')
-    parser.add_argument('--enc_in', type=int, default=7, help='encoder input size')
-    parser.add_argument('--dec_in', type=int, default=7, help='decoder input size')
-    parser.add_argument('--c_out', type=int, default=7, help='output size')
+    parser.add_argument('--enc_in', type=int, default=3, help='encoder input size')
+    parser.add_argument('--dec_in', type=int, default=3, help='decoder input size')
+    parser.add_argument('--c_out', type=int, default=3, help='output size')
     parser.add_argument('--d_model', type=int, default=16, help='dimension of model')
     parser.add_argument('--n_heads', type=int, default=8, help='num of heads')
     parser.add_argument('--e_layers', type=int, default=2, help='num of encoder layers')
@@ -83,14 +83,16 @@ def main(args=None, progress_callback=None):
     # 设置设备
     device = torch.device('cuda:0' if args.use_gpu else 'cpu')
     
-    # 加载模型
-    model = Model(args).to(device)
+    # 加载模型 - 启用SE和Hybrid模块
+    model = Model(args, use_se=True, use_hybrid=True).to(device)
     model.load_state_dict(torch.load(args.checkpoints, map_location=device))
     model.eval()
     
     # 创建结果保存目录
     dataset_name = os.path.splitext(os.path.basename(args.data_path))[0]
-    folder_path = f'./test_results/{dataset_name}_long_term_forecast_ETTh1_6h_TimesNet_ETTh1_ftM_sl96_ll48_pl6_dm16_nh8_el2_dl1_df32_expand2_dc4_fc3_ebtimeF_dtTrue_Exp_0/'
+    # 动态hour_str和pl参数
+    hour_str = f"{args.pred_len}h"
+    folder_path = f'./test_results/{dataset_name}_long_term_forecast_ETTh1_{hour_str}_TimesNet_ETTh1_ftM_sl96_ll48_pl{args.pred_len}_dm16_nh8_el2_dl1_df32_expand2_dc4_fc3_ebtimeF_dtTrue_Exp_0/'
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
     
@@ -119,15 +121,6 @@ def main(args=None, progress_callback=None):
             preds.append(pred)
             trues.append(true)
             
-            # 每个batch都绘制一次图，并加调试输出
-            try:
-                input = batch_x.detach().cpu().numpy()
-                gt = np.concatenate((input[0, :, -1], true[0, :, -1]), axis=0)
-                pd = np.concatenate((input[0, :, -1], pred[0, :, -1]), axis=0)
-                print(f"[DEBUG] 保存预测图: {os.path.join(folder_path, str(i) + '.png')}")
-                visual(gt, pd, os.path.join(folder_path, str(i) + '.png'))
-            except Exception as e:
-                print(f"[ERROR] 绘图失败: {e}")
             # 进度回调
             if progress_callback is not None:
                 percent = int((i + 1) / total_batches * 70) + 20  # 20~90之间
@@ -148,6 +141,14 @@ def main(args=None, progress_callback=None):
     # 保存预测结果
     np.save(os.path.join(folder_path, 'prediction.npy'), preds)
     np.save(os.path.join(folder_path, 'groundtruth.npy'), trues)
+    
+    # 保存数据集的统计信息
+    if hasattr(data_set, 'scaler'):
+        dataset_stats = {
+            'mean': data_set.scaler.mean_,
+            'std': data_set.scaler.scale_
+        }
+        np.save(os.path.join(folder_path, 'dataset_stats.npy'), dataset_stats)
 
     # 返回指标
     return {

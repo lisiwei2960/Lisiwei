@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Card, Button, Select, message, Progress, Table, Space, Modal } from 'antd';
+import { Card, Button, Select, message, Progress, Table, Space, Modal, Tag } from 'antd';
 import { Line } from '@ant-design/charts';
 
 const { Option } = Select;
@@ -59,6 +59,8 @@ const Prediction = () => {
   const [selectedPrediction, setSelectedPrediction] = useState(null);
   const [previewVisible, setPreviewVisible] = useState(false);
   const [previewData, setPreviewData] = useState(null);
+  const [selectedHour, setSelectedHour] = useState('24');
+  const [imageFiles, setImageFiles] = useState([]);
 
   // 获取数据集列表
   useEffect(() => {
@@ -110,12 +112,12 @@ const Prediction = () => {
     try {
       console.log('发送预测请求:', {
         dataset_id: selectedDataset,
-        model_name: 'TimeXer6'  // 固定使用 TimeXer6 模型
+        model_name: `TimeXer${selectedHour}`  // 根据选择的小时动态选择模型
       });
 
       const response = await api.post('/api/predict', {
         dataset_id: selectedDataset,
-        model_name: 'TimeXer6'  // 固定使用 TimeXer6 模型
+        model_name: `TimeXer${selectedHour}`  // 根据选择的小时动态选择模型
       });
 
       console.log('预测请求响应:', response.data);
@@ -163,6 +165,29 @@ const Prediction = () => {
     }, 2000);
   };
 
+  // 处理删除预测
+  const handleDeletePrediction = async (predictionId) => {
+    try {
+      await api.delete(`/predictions/${predictionId}`);
+      message.success('预测记录已删除');
+      fetchPredictions(); // 重新获取预测列表
+    } catch (error) {
+      console.error('删除预测失败:', error);
+      message.error('删除预测失败');
+    }
+  };
+
+  useEffect(() => {
+    if (selectedDataset && selectedHour) {
+      axios.get(`http://localhost:5000/prediction_images_by_prediction/${selectedDataset}/TimeXer${selectedHour}`)
+        .then(res => {
+          setImageFiles(res.data.images || []);
+        });
+    } else {
+      setImageFiles([]);
+    }
+  }, [selectedDataset, selectedHour]);
+
   const renderPredictionResult = (prediction) => {
     if (!prediction.result) return null;
     
@@ -195,7 +220,7 @@ const Prediction = () => {
         )}
 
         {result.prediction_data && (
-          <div style={{ marginBottom: 16 }}>
+          <div style={{ marginBottom: '16px' }}>
             <h3>预测结果</h3>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px' }}>
               <div style={{ width: '45%' }}>
@@ -234,33 +259,157 @@ const Prediction = () => {
           </div>
         )}
 
-        {result.image_files && result.image_files.length > 0 && (
+        {(imageFiles.length > 0 ? imageFiles : result.image_files)?.length > 0 && (
           <div>
             <h3>预测结果图表</h3>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px' }}>
-              {result.image_files.map((image, index) => (
-                <div key={index} style={{ width: '45%' }}>
-                  <img
-                    src={`/prediction_image/prediction_task/${image}`}
-                    alt={`预测结果 ${index + 1}`}
-                    style={{ width: '100%', height: 'auto', cursor: 'pointer' }}
-                    onClick={() => window.open(`/prediction_image/prediction_task/${image}`)}
-                    onError={(e) => {
-                      console.error('图片加载失败:', image);
-                      e.target.style.display = 'none';
-                    }}
-                  />
-                  <p style={{ textAlign: 'center', fontSize: '0.9em', color: '#666' }}>
-                    {`预测结果图 ${index + 1}`}
-                  </p>
-                </div>
-              ))}
+            <div style={{
+              width: '100%',
+              overflowX: 'auto',
+              whiteSpace: 'nowrap',
+              paddingBottom: '10px'
+            }}>
+              <div style={{
+                display: 'flex',
+                gap: '10px',
+                padding: '10px'
+              }}>
+                {(imageFiles.length > 0 ? imageFiles : result.image_files)
+                  .filter(image => image.startsWith(`TimeXer${selectedHour}/`) || (!image.includes('TimeXer') && imageFiles.length > 0))
+                  .map((image, index) => (
+                    <img
+                      key={index}
+                      src={
+                        image.startsWith('TimeXer')
+                          ? `http://localhost:5000/prediction_image/${selectedDataset}/${image}`
+                          : `http://localhost:5000/prediction_image/${selectedDataset}/TimeXer${selectedHour}/${image}`
+                      }
+                      alt={`预测结果 ${index + 1}`}
+                      style={{
+                        width: '300px',
+                        height: 'auto',
+                        borderRadius: '4px',
+                        boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+                        cursor: 'pointer',
+                        flexShrink: 0
+                      }}
+                      onClick={() => window.open(
+                        image.startsWith('TimeXer')
+                          ? `http://localhost:5000/prediction_image/${selectedDataset}/${image}`
+                          : `http://localhost:5000/prediction_image/${selectedDataset}/TimeXer${selectedHour}/${image}`
+                      )}
+                      onError={(e) => {
+                        console.error('图片加载失败:', image);
+                        e.target.style.display = 'none';
+                      }}
+                    />
+                  ))}
+              </div>
             </div>
+            <style>
+              {`
+                /* 美化滚动条 */
+                div::-webkit-scrollbar {
+                  height: 8px;
+                }
+                div::-webkit-scrollbar-track {
+                  background: #f1f1f1;
+                  border-radius: 16px;
+                }
+                div::-webkit-scrollbar-thumb {
+                  background: #888;
+                  border-radius: 16px;
+                }
+                div::-webkit-scrollbar-thumb:hover {
+                  background: #555;
+                }
+              `}
+            </style>
           </div>
         )}
       </div>
     );
   };
+
+  // 渲染前筛选预测结果
+  const filteredPredictions = predictions.filter(pred => {
+    let params = pred.parameters;
+    if (typeof params === 'string') {
+      try { params = JSON.parse(params); } catch { params = {}; }
+    }
+    return params.model_name === `TimeXer${selectedHour}`;
+  });
+
+  // 定义表格列
+  const columns = [
+    {
+      title: '数据集',
+      dataIndex: 'dataset_name',
+      key: 'dataset_name',
+    },
+    {
+      title: '模型',
+      dataIndex: 'model',
+      key: 'model',
+    },
+    {
+      title: '状态',
+      dataIndex: 'status',
+      key: 'status',
+      render: (status) => {
+        let color = 'default';
+        let text = status;
+        
+        switch (status) {
+          case 'completed':
+            color = 'success';
+            text = '完成';
+            break;
+          case 'running':
+            color = 'processing';
+            text = '运行中';
+            break;
+          case 'error':
+            color = 'error';
+            text = '错误';
+            break;
+          default:
+            text = '未知';
+        }
+        
+        return <Tag color={color}>{text}</Tag>;
+      }
+    },
+    {
+      title: '创建时间',
+      dataIndex: 'created_at',
+      key: 'created_at',
+    },
+    {
+      title: '操作',
+      key: 'action',
+      render: (_, record) => (
+        <Space size="middle">
+          <Button 
+            type="link" 
+            onClick={() => {
+              setSelectedPrediction(record);
+              setPreviewVisible(true);
+              console.log('查看预测结果:', record); // 添加调试信息
+            }}
+          >
+            查看结果
+          </Button>
+          <Button 
+            type="link" 
+            danger
+            onClick={() => handleDeletePrediction(record.id)}
+          >
+            删除
+          </Button>
+        </Space>
+      ),
+    },
+  ];
 
   return (
     <div style={{ padding: '24px' }}>
@@ -285,6 +434,19 @@ const Prediction = () => {
             >
               开始预测
             </Button>
+          </div>
+          
+          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+            <span style={{ marginRight: '8px' }}>预测时长：</span>
+            <Select
+              style={{ width: 120 }}
+              value={selectedHour}
+              onChange={setSelectedHour}
+            >
+              <Option value="6">6小时</Option>
+              <Option value="12">12小时</Option>
+              <Option value="24">24小时</Option>
+            </Select>
           </div>
           
           <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
@@ -322,7 +484,7 @@ const Prediction = () => {
       <Card title="预测历史">
         <Table 
           columns={columns} 
-          dataSource={predictions} 
+          dataSource={filteredPredictions}
           rowKey="id"
           pagination={{ pageSize: 10 }}
         />
@@ -332,11 +494,38 @@ const Prediction = () => {
         title="预测详情"
         open={previewVisible}
         onCancel={() => setPreviewVisible(false)}
-        width={800}
+        width={1200}
+        style={{ top: 20 }}
+        bodyStyle={{ maxHeight: 'calc(100vh - 200px)', overflowY: 'auto' }}
         footer={null}
       >
-        {selectedPrediction && renderPredictionResult(selectedPrediction)}
+        {selectedPrediction && (
+          <div style={{ padding: '20px' }}>
+            {renderPredictionResult(selectedPrediction)}
+          </div>
+        )}
       </Modal>
+
+      <style>
+        {`
+          .ant-modal-body {
+            overflow-x: hidden;
+          }
+          .ant-modal-body::-webkit-scrollbar {
+            width: 6px;
+          }
+          .ant-modal-body::-webkit-scrollbar-track {
+            background: #f1f1f1;
+          }
+          .ant-modal-body::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 3px;
+          }
+          .ant-modal-body::-webkit-scrollbar-thumb:hover {
+            background: #555;
+          }
+        `}
+      </style>
     </div>
   );
 };

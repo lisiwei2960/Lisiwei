@@ -190,8 +190,8 @@ class Model(nn.Module):
 
         _, _, N = x_enc.shape
 
-        en_embed, n_vars = self.en_embedding(x_enc[:, :, -1].unsqueeze(-1).permute(0, 2, 1))
-        ex_embed = self.ex_embedding(x_enc[:, :, :-1], x_mark_enc)
+        en_embed, n_vars = self.en_embedding(x_enc.permute(0, 2, 1))
+        ex_embed = self.ex_embedding(x_enc, x_mark_enc)
 
         # 应用SE模块 - 新实现
         if self.use_se:
@@ -229,8 +229,8 @@ class Model(nn.Module):
 
         if self.use_norm:
             # De-Normalization from Non-stationary Transformer
-            dec_out = dec_out * (stdev[:, 0, -1:].unsqueeze(1).repeat(1, self.pred_len, 1))
-            dec_out = dec_out + (means[:, 0, -1:].unsqueeze(1).repeat(1, self.pred_len, 1))
+            dec_out = dec_out * (stdev[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
+            dec_out = dec_out + (means[:, 0, :].unsqueeze(1).repeat(1, self.pred_len, 1))
 
         return dec_out
 

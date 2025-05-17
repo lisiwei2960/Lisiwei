@@ -1,0 +1,98 @@
+.preview-modal-mask {
+  position: fixed;
+  left: 0; top: 0; width: 100vw; height: 100vh;
+  background: rgba(0,0,0,0.3);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  z-index: 99999;
+  opacity: 0;
+  transition: opacity 0.4s cubic-bezier(0.23, 1, 0.32, 1), backdrop-filter 0.4s cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.preview-modal-mask.visible {
+  opacity: 1;
+}
+
+.dataset-preview-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.95);
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-radius: 16px;
+  padding: 24px;
+  min-width: 400px;
+  max-width: 90vw;
+  max-height: 80vh;
+  overflow: auto;
+  box-shadow: 0 20px 50px rgba(0,0,0,0.15);
+  z-index: 100000;
+  opacity: 0;
+  transition: all 0.4s cubic-bezier(0.23, 1, 0.32, 1);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  font-family: "SF Pro SC", "SF Pro Text", "SF Pro Icons", "PingFang SC", "Helvetica Neue", "Helvetica", "Arial", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.022em;
+  font-synthesis: none;
+}
+
+.dataset-preview-modal h3 {
+  font-weight: 500;
+  font-size: 17px;
+  color: rgba(0, 0, 0, 0.85);
+  margin-bottom: 16px;
+  letter-spacing: -0.022em;
+}
+
+.dataset-preview-modal.visible {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.table-container {
+  width: 100%;
+  overflow-x: auto;
+}
+
+table {
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+th {
+  padding: 10px;
+  font-weight: 500;
+  text-align: left;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+  color: rgba(0, 0, 0, 0.75);
+}
+
+td {
+  padding: 10px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  color: rgba(0, 0, 0, 0.65);
+}
+
+.close-button {
+  padding: 8px 20px;
+  background: rgba(24, 144, 255, 0.8);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.2s cubic-bezier(0.23, 1, 0.32, 1);
+  font-size: 14px;
+  letter-spacing: -0.01em;
+}
+
+.close-button:hover {
+  background: rgba(64, 169, 255, 0.9);
+  box-shadow: 0 2px 8px rgba(24, 144, 255, 0.3);
+} 

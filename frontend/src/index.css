@@ -5,38 +5,57 @@
   box-sizing: border-box;
 }
 
+/* 字体定义 */
+@font-face {
+  font-family: 'SF Pro Display';
+  src: local('SF Pro Display'),
+       local('SFProDisplay-Regular');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'SF Pro Text';
+  src: local('SF Pro Text'),
+       local('SFProText-Regular');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* 滚动条美化 */
 ::-webkit-scrollbar {
   width: 8px;
-  background: #e6eaf3;
+  background: #f5f5f7;
 }
 
 ::-webkit-scrollbar-track {
   background: #f1f1f1;
-  border-radius: 4px;
+  border-radius: 10px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #b3d4fc;
-  border-radius: 4px;
+  background: #c1c1c4;
+  border-radius: 10px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #1890ff;
+  background: #a1a1a6;
 }
 
 /* 全局过渡效果 */
 * {
-  transition: background-color 0.3s ease,
-              border-color 0.3s ease,
-              box-shadow 0.3s ease,
-              transform 0.3s ease;
+  transition: background-color 0.2s cubic-bezier(0.25, 0.1, 0.25, 1),
+              border-color 0.2s cubic-bezier(0.25, 0.1, 0.25, 1),
+              box-shadow 0.2s cubic-bezier(0.25, 0.1, 0.25, 1),
+              transform 0.2s cubic-bezier(0.25, 0.1, 0.25, 1);
 }
 
 /* 文本选择样式 */
 ::selection {
-  background: #e6f7ff;
-  color: #1890ff;
+  background: rgba(0, 122, 255, 0.2);
+  color: #007aff;
 }
 
 /* 基础样式 */
@@ -47,28 +66,42 @@ html {
 }
 
 body {
-  background: #f7fafd;
+  background: #f5f5f7;
   min-height: 100vh;
-  color: #222;
-  font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
-  letter-spacing: 0.01em;
+  color: #1d1d1f;
+  font-family: "SF Pro SC", "SF Pro Text", "SF Pro Icons", "PingFang SC", "Helvetica Neue", "Helvetica", "Arial", sans-serif;
+  letter-spacing: -0.022em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-synthesis: none;
   position: relative;
   overflow-x: hidden;
 }
 
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 500;
+  letter-spacing: -0.022em;
+  color: #1d1d1f;
+}
+
+p {
+  color: #484848;
+  font-size: 15px;
+}
+
 code {
-  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
-    monospace;
+  font-family: SF Mono, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: 0.9em;
 }
 
 /* 链接样式 */
 a {
-  color: #1890ff;
+  color: #0066cc;
   text-decoration: none;
 }
 
 a:hover {
-  color: #40a9ff;
+  color: #0070e0;
 }
 
 /* 文本选择禁用 */
@@ -88,6 +121,65 @@ img {
   user-drag: none;
 }
 
+/* 按钮基础样式 */
+button, .button, input[type="button"], input[type="submit"] {
+  font-family: "SF Pro SC", "SF Pro Text", "SF Pro Icons", "PingFang SC", "Helvetica Neue", "Helvetica", "Arial", sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  border-radius: 8px;
+  padding: 8px 16px;
+  background-color: rgba(0, 122, 255, 0.9);
+  color: white;
+  border: none;
+  transition: all 0.2s cubic-bezier(0.25, 0.1, 0.25, 1);
+  cursor: pointer;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button:hover, .button:hover, input[type="button"]:hover, input[type="submit"]:hover {
+  background-color: rgba(0, 122, 255, 1);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 122, 255, 0.3);
+}
+
+button:active, .button:active, input[type="button"]:active, input[type="submit"]:active {
+  background-color: rgba(0, 90, 210, 1);
+  transform: translateY(0);
+  box-shadow: 0 1px 4px rgba(0, 90, 210, 0.2);
+}
+
+button.secondary, .button.secondary {
+  background-color: rgba(220, 220, 220, 0.9);
+  color: #1d1d1f;
+}
+
+button.secondary:hover, .button.secondary:hover {
+  background-color: rgba(230, 230, 230, 1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+button.secondary:active, .button.secondary:active {
+  background-color: rgba(200, 200, 200, 1);
+}
+
+button:focus, .button:focus, input[type="button"]:focus, input[type="submit"]:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.3);
+}
+
+button.secondary:focus, .button.secondary:focus {
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.1);
+}
+
+button:disabled, .button:disabled, input[type="button"]:disabled, input[type="submit"]:disabled {
+  background-color: rgba(0, 122, 255, 0.4);
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
 /* 动画类 */
 .fade-enter {
   opacity: 0;
@@ -95,7 +187,7 @@ img {
 
 .fade-enter-active {
   opacity: 1;
-  transition: opacity 300ms ease-in;
+  transition: opacity 300ms cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 .fade-exit {
@@ -104,7 +196,7 @@ img {
 
 .fade-exit-active {
   opacity: 0;
-  transition: opacity 300ms ease-in;
+  transition: opacity 300ms cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 /* 响应式布局断点 */
@@ -126,10 +218,20 @@ img {
   }
 }
 
-/* 粒子背景容器（可配合JS/React粒子库使用） */
+/* 粒子背景容器 */
 #tech-particles-bg {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
   z-index: 0;
   pointer-events: none;
+}
+
+/* 卡片样式 */
+.card {
+  background-color: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
 } 

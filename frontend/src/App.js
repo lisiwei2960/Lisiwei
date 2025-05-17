@@ -1,14 +1,45 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useRef as useMessageRef } from 'react';
+import { Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import './App.css';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
+import History from './components/History';
+import Intro from './components/Intro';
+import LoadingSpinner from './components/LoadingSpinner';
+import UploadSection from './components/UploadSection';
+import { CSSTransition, SwitchTransition } from 'react-transition-group';
+import DatasetList from './components/DatasetList';
+import PredictionSection from './components/PredictionSection';
+import GlobalMessage from './components/GlobalMessage';
+import PreviewModal from './components/PreviewModal';
+import NavBar from './components/NavBar';
+import AuthForm from './components/AuthForm';
+import CommentPage from './components/CommentPage';
+import ProfilePage from './components/ProfilePage';
+import UserAdminPage from './components/UserAdminPage';
 dayjs.extend(utc);
+
+// 在 App 组件外部添加 axios 拦截器（只添加一次）
+if (!window._axios401InterceptorAdded) {
+  axios.interceptors.response.use(
+    response => response,
+    error => {
+      if (error.response && error.response.status === 401) {
+        localStorage.removeItem('token');
+        // 这里不能直接 setToken，因为在拦截器外部
+        window.dispatchEvent(new Event('jwt-unauthorized'));
+      }
+      return Promise.reject(error);
+    }
+  );
+  window._axios401InterceptorAdded = true;
+}
 
 function App() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [token, setToken] = useState('');
+  const [token, setToken] = useState(localStorage.getItem('token'));
   const [files, setFiles] = useState([]);
   const [datasets, setDatasets] = useState([]);
   const [selectedDataset, setSelectedDataset] = useState(null);
@@ -17,39 +48,115 @@ function App() {
   const [selectedPrediction, setSelectedPrediction] = useState(null);
   const [predictionPreview, setPredictionPreview] = useState(null);
   const [error, setError] = useState('');
-  const [predictionParams, setPredictionParams] = useState({
-    task_name: 'prediction_task',
-    model: 'TimesNet',
-    seq_len: 96,
-    label_len: 48,
-    pred_len: 6,
-    train_epochs: 1,
-    batch_size: 32
-  });
+  const [predictionParams, setPredictionParams] = useState({});
   const [currentPrediction, setCurrentPrediction] = useState(null);
   const [predictionProgress, setPredictionProgress] = useState(null);
   const [predictionImages, setPredictionImages] = useState({});
   const [uploadProgress, setUploadProgress] = useState({});
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState('');
-  const [messageType, setMessageType] = useState('info'); // 'info', 'success', 'error'
+  const [messageType, setMessageType] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [authTab, setAuthTab] = useState('login'); // 'login' 或 'register'
+  const [isDatasetListCollapsed, setIsDatasetListCollapsed] = useState(false);
+  const fileInputRef = useRef(null);
+  const [previewData, setPreviewData] = useState(null);
+  const [previewVisible, setPreviewVisible] = useState(false);
+  const [predictHour, setPredictHour] = useState('6'); // 6, 12, 24
+  const [messageFadeOut, setMessageFadeOut] = useState(false);
+  const messageTimeoutRef = useRef();
+  const fadeOutTimeoutRef = useRef();
+  const location = useLocation();
+  const [isMessageHover, setIsMessageHover] = useState(false);
+  const isLoggedIn = !!token;
+  const [confirmDeleteDatasetId, setConfirmDeleteDatasetId] = useState(null);
+  const isAdmin = localStorage.getItem('is_admin') === 'true';
 
-  // 设置axios默认headers
+  // 自动收起/展开数据集列表：为空时收起，上传后有数据时自动展开
+  useEffect(() => {
+    if (datasets.length === 0) {
+      setIsDatasetListCollapsed(true);
+    } else {
+      setIsDatasetListCollapsed(false);
+    }
+  }, [datasets]);
+
+  // 校验token有效性
+  const checkTokenValid = async () => {
+    if (!token) return false;
+    try {
+      // 这里假设有/user/info接口用于校验token有效性，如果没有可用/datasets
+      await axios.get('http://localhost:5000/datasets');
+      return true;
+    } catch (err) {
+      if (err.response && err.response.status === 401) {
+        setToken('');
+        localStorage.removeItem('token');
+        setError('登录已过期，请重新登录');
+      }
+      return false;
+    }
+  };
+
   useEffect(() => {
     if (token) {
       axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-      fetchDatasets();
+      // 先校验token有效性
+      checkTokenValid().then(valid => {
+        if (valid) {
+          fetchDatasets();
+        }
+      });
     }
   }, [token]);
+
+  // error 自动消失逻辑
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => setError(''), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  // 新增：鼠标事件处理
+  const handleMessageMouseEnter = () => {
+    setIsMessageHover(true);
+    if (messageTimeoutRef.current) clearTimeout(messageTimeoutRef.current);
+    if (fadeOutTimeoutRef.current) clearTimeout(fadeOutTimeoutRef.current);
+  };
+  const handleMessageMouseLeave = () => {
+    setIsMessageHover(false);
+    if (messageTimeoutRef.current) clearTimeout(messageTimeoutRef.current);
+    if (fadeOutTimeoutRef.current) clearTimeout(fadeOutTimeoutRef.current);
+    // 重新计时
+    messageTimeoutRef.current = setTimeout(() => {
+      setMessageFadeOut(true);
+      fadeOutTimeoutRef.current = setTimeout(() => setMessage(''), 400);
+    }, 1000);
+  };
+
+  // useEffect 只依赖 message
+  useEffect(() => {
+    if (!message) return;
+    if (!isMessageHover) {
+      if (messageTimeoutRef.current) clearTimeout(messageTimeoutRef.current);
+      if (fadeOutTimeoutRef.current) clearTimeout(fadeOutTimeoutRef.current);
+      messageTimeoutRef.current = setTimeout(() => {
+        setMessageFadeOut(true);
+        fadeOutTimeoutRef.current = setTimeout(() => setMessage(''), 400);
+      }, 1000);
+    }
+    return () => {
+      if (messageTimeoutRef.current) clearTimeout(messageTimeoutRef.current);
+      if (fadeOutTimeoutRef.current) clearTimeout(fadeOutTimeoutRef.current);
+    };
+  }, [message]);
 
   const handleRegister = async () => {
     try {
       const response = await axios.post('http://localhost:5000/register', { username, password });
-      setMessage(response.data.message);
-      setMessageType('success');
-      setTimeout(() => setMessage(''), 3000);
+      showMessage(response.data.message);
+      setTimeout(() => { showMessage('', '', 400); }, 1000);
     } catch (err) {
       setError(err.response?.data?.error || '注册失败');
     }
@@ -58,18 +165,29 @@ function App() {
   const handleLogin = async () => {
     try {
       const response = await axios.post('http://localhost:5000/login', { username, password });
-      setToken(response.data.token);
-      setMessage('登录成功');
-      setMessageType('success');
-      setTimeout(() => setMessage(''), 3000);
+      const token = response.data.token;
+      setToken(token);
+      localStorage.setItem('token', token);
+      localStorage.setItem('username', response.data.username);
+      localStorage.setItem('is_admin', response.data.is_admin);
+      // 设置axios默认headers
+      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+      showMessage('登录成功');
+      // 登录成功后立即获取数据集列表
+      await fetchDatasets();
+      // 新增：登录成功后刷新个人中心页面
+      window.dispatchEvent(new Event('refresh-profile'));
     } catch (err) {
       setError(err.response?.data?.error || '登录失败');
+      showMessage('登录失败', 'error');
+      setTimeout(() => { showMessage('', '', 400); }, 1000);
     }
   };
 
   const fetchDatasets = async () => {
     try {
       const response = await axios.get('http://localhost:5000/datasets');
+      console.log('数据集列表响应:', response.data.datasets);
       setDatasets(response.data.datasets);
     } catch (err) {
       setError(err.response?.data?.error || '获取数据集列表失败');
@@ -77,7 +195,15 @@ function App() {
   };
 
   const handleFileChange = (e) => {
-    setFiles(Array.from(e.target.files));
+    const maxSize = 1000 * 1024 * 1024; // 1000MB
+    const selectedFiles = Array.from(e.target.files);
+    const oversizeFile = selectedFiles.find(file => file.size > maxSize);
+    if (oversizeFile) {
+      setError('文件大小不能超过1000MB：' + oversizeFile.name);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+    setFiles(selectedFiles);
   };
 
   const handleUpload = async () => {
@@ -96,6 +222,13 @@ function App() {
         const file = files[i];
         const formData = new FormData();
         formData.append('file', file);
+        
+        // 使用 dayjs 处理北京时间
+        const now = dayjs();
+        const beijingTime = now.utcOffset(8);
+        const formattedTime = beijingTime.format('YYYY-MM-DD HH:mm:ss.SSSSSS');
+        console.log('北京时间:', formattedTime);
+        formData.append('created_at', formattedTime);
 
         setUploadProgress(prev => ({
           ...prev,
@@ -141,19 +274,17 @@ function App() {
         }
       }
 
-      // 刷新数据集列表
       await fetchDatasets();
       
-      // 显示上传结果
       if (successCount > 0) {
-        setMessage(`上传完成：${successCount}个成功，${failCount}个失败`);
-        setMessageType('success');
-        setTimeout(() => setMessage(''), 3000);
+        showMessage(`上传完成：${successCount}个成功，${failCount}个失败`);
       }
       
-      // 清空文件列表和进度
       setFiles([]);
       setUploadProgress({});
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
       
     } catch (err) {
       setError('上传过程中发生错误');
@@ -187,7 +318,8 @@ function App() {
       const response = await axios.get(`http://localhost:5000/datasets/${datasetId}`);
       setSelectedDataset(datasetId);
       setDatasetPreview(response.data);
-      
+      setPredictionProgress(null);
+      showMessage('数据集选择成功');
       // 获取该数据集的预测结果
       try {
         const predResponse = await axios.get(`http://localhost:5000/predictions`);
@@ -220,19 +352,22 @@ function App() {
       setError('');
       setPredictionProgress(null);
       setPredictionImages({});
-      
+
       // 使用数据集ID作为任务名称的一部分
       const taskName = `dataset_${selectedDataset}_${Date.now()}`;
       setPredictionParams(prev => ({
         ...prev,
         task_name: taskName
       }));
-      
+
+      // 传递预测时长给后端
+      const modelName = predictHour === '6' ? 'TimeXer6' : predictHour === '12' ? 'TimeXer12' : 'TimeXer24';
       const response = await axios.post('http://localhost:5000/predict', {
         dataset_id: selectedDataset,
-        task_name: taskName
+        task_name: taskName,
+        model_name: modelName
       });
-      
+
       setCurrentPrediction(response.data.prediction_id);
       startProgressPolling(response.data.prediction_id);
     } catch (err) {
@@ -248,28 +383,31 @@ function App() {
         
         if (response.data.status === 'completed') {
           clearInterval(pollInterval);
-          // 预测完成后，自动更新数据
+          setCurrentPrediction(null);
+          // 新增：预测成功气泡提示
+          showMessage('预测任务已完成');
           if (selectedDataset) {
-            // 获取最新的预测结果
             const predResponse = await axios.get(`http://localhost:5000/predictions`);
-            // 过滤出属于当前数据集的预测结果，并按时间排序
             const datasetPredictions = predResponse.data.predictions
               .filter(pred => pred.dataset_id === selectedDataset)
               .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-            
             setPredictions(datasetPredictions);
-            console.log('已更新预测结果列表:', datasetPredictions);
-            
-            // 获取最新的预测图片
-            await fetchDatasetImages(selectedDataset);
+            if (datasetPredictions.length > 0 && datasetPredictions[0].result && datasetPredictions[0].result.image_files && datasetPredictions[0].result.image_files.length > 0) {
+              const modelName = datasetPredictions[0].parameters?.model_name || (typeof datasetPredictions[0].parameters === 'string' ? JSON.parse(datasetPredictions[0].parameters).model_name : '');
+              await fetchPredictionImagesByPrediction(selectedDataset, modelName, datasetPredictions[0].id);
+            } else {
+              setPredictionImages(prev => ({ ...prev, [datasetPredictions[0]?.id]: [] }));
+            }
           }
         } else if (response.data.status === 'error') {
           clearInterval(pollInterval);
           setError(response.data.message);
+          setCurrentPrediction(null);
         }
       } catch (err) {
         clearInterval(pollInterval);
         setError('获取预测进度失败');
+        setCurrentPrediction(null);
       }
     }, 1000);
   };
@@ -300,22 +438,36 @@ function App() {
   }, [predictionProgress?.status, selectedDataset]);
 
   const handleDeleteDataset = async (datasetId) => {
+    setConfirmDeleteDatasetId(datasetId);
+  };
+
+  const confirmDeleteDataset = async () => {
+    if (!confirmDeleteDatasetId) return;
     try {
-      await axios.delete(`http://localhost:5000/datasets/${datasetId}`);
-      setDatasets(datasets.filter(ds => ds.id !== datasetId));
-      if (selectedDataset === datasetId) {
+      // 先删除预测结果文件夹
+      await axios.delete(`http://localhost:5000/predictions/folder/${confirmDeleteDatasetId}`);
+      console.log('已删除预测结果文件夹');
+
+      // 再删除预测结果记录
+      await axios.delete(`http://localhost:5000/predictions/dataset/${confirmDeleteDatasetId}`);
+      console.log('已删除数据集的预测结果');
+
+      // 最后删除数据集
+      await axios.delete(`http://localhost:5000/datasets/${confirmDeleteDatasetId}`);
+      setDatasets(datasets.filter(ds => ds.id !== confirmDeleteDatasetId));
+      if (selectedDataset === confirmDeleteDatasetId) {
         setSelectedDataset(null);
         setDatasetPreview(null);
         setPredictionProgress(null);
         setPredictionImages({});
+        setPredictions([]);
       }
-      setMessage('数据集删除成功');
-      setMessageType('success');
-      setTimeout(() => setMessage(''), 3000);
-      setConfirmDeleteId(null);
+      showMessage('数据集删除成功');
+      setTimeout(() => { showMessage('', '', 400); }, 1000);
     } catch (err) {
       setError(err.response?.data?.error || '删除失败');
-      setConfirmDeleteId(null);
+    } finally {
+      setConfirmDeleteDatasetId(null);
     }
   };
 
@@ -344,9 +496,7 @@ function App() {
         }
         
         // 显示成功消息
-        setMessage('预测结果已删除');
-        setMessageType('success');
-        setTimeout(() => setMessage(''), 3000);
+        showMessage('预测结果已删除');
 
         // 如果删除后没有预测结果了，清空图片显示
         if (updatedPredictions.length === 0) {
@@ -358,382 +508,328 @@ function App() {
       }
     } catch (error) {
       console.error('删除预测结果失败:', error);
-      setMessage(error.response?.data?.error || '删除失败');
-      setMessageType('error');
-      setTimeout(() => setMessage(''), 3000);
+      showMessage(error.response?.data?.error || '删除失败', 'error');
     }
   };
 
-  const renderPredictionImages = () => {
-    const currentImages = predictionImages[selectedDataset] || [];
-    console.log(`当前数据集 ${selectedDataset} 的图片:`, currentImages);
-    
-    if (currentImages.length === 0) {
-      if (predictions.length === 0) {
-        return <div className="no-predictions">暂无预测结果</div>;
+  const handleExportPredictions = async () => {
+    if (!selectedDataset || !predictions.length) {
+      setError('没有可导出的预测结果');
+      return;
+    }
+
+    try {
+      const dataset = datasets.find(ds => ds.id === selectedDataset);
+      // 直接使用预测记录的创建时间
+      const timestamp = predictions[0].created_at
+        .replace(/[:.]/g, '-')
+        .replace('T', '_')
+        .replace('Z', '');
+      
+      // 获取所有预测图片
+      const images = predictionImages[selectedDataset] || [];
+      if (images.length === 0) {
+        setError('没有可导出的预测图片');
+        return;
       }
-      return null;
+
+      // 创建一个zip文件
+      const JSZip = (await import('jszip')).default;
+      const zip = new JSZip();
+
+      // 下载所有图片并添加到zip
+      const downloadPromises = images.map(async (image, index) => {
+        try {
+          const response = await axios.get(
+            `http://localhost:5000/prediction_image/${selectedDataset}/${image}`,
+            { responseType: 'blob' }
+          );
+          zip.file(`prediction_${index + 1}.png`, response.data);
+        } catch (err) {
+          console.error(`下载图片 ${image} 失败:`, err);
+        }
+      });
+
+      await Promise.all(downloadPromises);
+
+      // 生成zip文件
+      const content = await zip.generateAsync({ type: 'blob' });
+      
+      // 创建下载链接
+      const url = window.URL.createObjectURL(content);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `${dataset.filename}_${timestamp}.zip`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+
+      showMessage('预测结果导出成功');
+      setTimeout(() => { showMessage('', '', 400); }, 1000);
+    } catch (err) {
+      console.error('导出失败:', err);
+      setError(err.response?.data?.error || '导出失败');
+      showMessage('导出失败', 'error');
     }
-    
-    return (
-      <div className="prediction-images">
-        <h3>预测结果图表</h3>
-        <div className="image-grid">
-          {currentImages.map((image, index) => {
-            const imageUrl = `http://localhost:5000/prediction_image/${selectedDataset}/${image}`;
-            console.log(`加载图片 ${index + 1}:`, imageUrl);
-            
-            return (
-              <div key={index} className="image-container">
-                <img 
-                  src={imageUrl}
-                  alt={`预测结果图 ${index + 1}`}
-                  onClick={() => window.open(imageUrl)}
-                  onError={(e) => {
-                    console.error(`图片加载失败: ${imageUrl}`);
-                    e.target.style.display = 'none';
-                  }}
-                  onLoad={() => console.log(`图片加载成功: ${imageUrl}`)}
-                />
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    );
   };
 
-  const renderUploadSection = () => (
-    <div className="upload-section">
-      <h2>上传数据集</h2>
-      <div className="upload-controls">
-        <input 
-          type="file" 
-          onChange={handleFileChange} 
-          accept=".csv" 
-          multiple 
-          disabled={uploading}
+  const fetchPredictionImagesByPrediction = async (datasetId, modelName, predictionId) => {
+    try {
+      const imagesResponse = await axios.get(`http://localhost:5000/prediction_images_by_prediction/${datasetId}/${modelName}`);
+      if (imagesResponse.data.images && imagesResponse.data.images.length > 0) {
+        setPredictionImages(prev => ({
+          ...prev,
+          [predictionId]: imagesResponse.data.images.map(img => `${modelName}/${img}`)
+        }));
+      } else {
+        setPredictionImages(prev => ({ ...prev, [predictionId]: [] }));
+      }
+    } catch (imgErr) {
+      setPredictionImages(prev => ({ ...prev, [predictionId]: [] }));
+    }
+  };
+
+  const renderMainContent = (location) => (
+    <div className="main-content">
+      <NavBar onLogout={() => {
+        setToken('');
+        showMessage('已退出登录');
+      }} isAdmin={isAdmin} />
+      {location.pathname === '/' && (
+        <DatasetList
+          isCollapsed={isDatasetListCollapsed}
+          onCollapseToggle={() => setIsDatasetListCollapsed(!isDatasetListCollapsed)}
+          datasets={datasets}
+          selectedDataset={selectedDataset}
+          handlePreviewDataset={handlePreviewDataset}
+          handleDatasetSelect={handleDatasetSelect}
+          handleDeleteDataset={handleDeleteDataset}
         />
-        <button 
-          onClick={handleUpload} 
-          disabled={files.length === 0 || uploading}
+      )}
+      <SwitchTransition mode="out-in">
+        <CSSTransition
+          key={location.pathname}
+          classNames="page-fade-apple"
+          timeout={600}
+          unmountOnExit
         >
-          {uploading ? '上传中...' : '上传'}
-        </button>
-      </div>
-      
-      {files.length > 0 && (
-        <div className="selected-files">
-          <h3>已选择的文件：</h3>
-          <ul>
-            {files.map((file, index) => (
-              <li key={index}>
-                {file.name} ({(file.size / 1024).toFixed(2)} KB)
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      
-      {Object.keys(uploadProgress).length > 0 && (
-        <div className="upload-progress-list">
-          <h3>上传进度：</h3>
-          {Object.entries(uploadProgress).map(([fileName, info]) => (
-            <div key={fileName} className={`upload-progress-item ${info.status}`}>
-              <div className="file-info">
-                <span className="filename">{fileName}</span>
-                <span className="status">
-                  {info.status === 'uploading' ? `${info.progress}%` :
-                   info.status === 'success' ? '✓ 成功' :
-                   info.status === 'error' ? '✗ 失败' : ''}
-                </span>
-              </div>
-              <div className="progress-bar">
-                <div 
-                  className="progress-bar-fill"
-                  style={{ 
-                    width: `${info.progress}%`,
-                    backgroundColor: info.status === 'error' ? '#ff4d4f' :
-                                   info.status === 'success' ? '#52c41a' : '#1890ff'
-                  }}
-                ></div>
-              </div>
-              {info.message && (
-                <div className="upload-message">
-                  {info.message}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+          <div className={`content${location.pathname === '/' ? ' with-sidebar' : ''}`} style={{ minHeight: 500 }}>
+            <Routes location={location}>
+              <Route path="/" element={
+                <>
+                  <UploadSection
+                    files={files}
+                    setFiles={setFiles}
+                    uploading={uploading}
+                    uploadProgress={uploadProgress}
+                    handleFileChange={handleFileChange}
+                    handleUpload={handleUpload}
+                    fileInputRef={fileInputRef}
+                  />
+                  {datasets.length === 0 ? (
+                    <div className="no-predictions">请上传数据集</div>
+                  ) : datasets.length > 0 && !selectedDataset ? (
+                    <div className="no-predictions">请选择数据集开始预测</div>
+                  ) : selectedDataset ? <PredictionSection
+                    predictHour={predictHour}
+                    setPredictHour={setPredictHour}
+                    selectedDataset={selectedDataset}
+                    predictions={predictions}
+                    predictionProgress={predictionProgress}
+                    currentPrediction={currentPrediction}
+                    handleExportPredictions={handleExportPredictions}
+                    handlePredict={handlePredict}
+                    setPredictions={setPredictions}
+                    setPredictionImages={setPredictionImages}
+                    predictionImages={predictionImages}
+                    axios={axios}
+                  /> : null}
+                </>
+              } />
+              <Route path="/history" element={
+                <History 
+                  onPredictionDeleted={(predictionId) => {
+                    setPredictions(prev => prev.filter(p => p.id !== predictionId));
+                    if (selectedPrediction && selectedPrediction.id === predictionId) {
+                      setSelectedPrediction(null);
+                      setPredictionPreview(null);
+                    }
+                    if (selectedDataset) {
+                      fetchDatasetImages(selectedDataset);
+                    }
+                    setCurrentPrediction(null);
+                  }} 
+                  setMessage={setMessage}
+                  setMessageType={setMessageType}
+                />
+              } />
+              <Route path="/intro" element={<Intro />} />
+              <Route path="/comments" element={<CommentPage showMessage={showMessage} />} />
+              <Route path="/profile" element={<ProfilePage showMessage={showMessage} />} />
+              <Route path="/admin/users" element={isAdmin ? <UserAdminPage showMessage={showMessage} /> : <Navigate to="/" replace />} />
+            </Routes>
+          </div>
+        </CSSTransition>
+      </SwitchTransition>
     </div>
   );
 
-  // 在组件卸载时清理状态
+  // 预览数据集前5行
+  const handlePreviewDataset = async (datasetId) => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await axios.get(`http://localhost:5000/datasets/${datasetId}/preview`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setPreviewData(response.data.preview);
+      setPreviewVisible(true);
+    } catch (err) {
+      setError('获取数据集预览失败');
+    }
+  };
+
+  // 优化setMessage逻辑，防止动画错乱
+  const showMessage = (msg, type = 'success', duration = 1000) => {
+    if (messageTimeoutRef.current) clearTimeout(messageTimeoutRef.current);
+    if (fadeOutTimeoutRef.current) clearTimeout(fadeOutTimeoutRef.current);
+    setMessageFadeOut(false);
+    setMessage(msg);
+    setMessageType(type);
+    messageTimeoutRef.current = setTimeout(() => {
+      setMessageFadeOut(true);
+      fadeOutTimeoutRef.current = setTimeout(() => setMessage(''), 400);
+    }, duration);
+  };
+
+  // 关闭按钮也要加动画
+  const handleCloseMessage = () => {
+    if (messageTimeoutRef.current) clearTimeout(messageTimeoutRef.current);
+    if (fadeOutTimeoutRef.current) clearTimeout(fadeOutTimeoutRef.current);
+    setMessageFadeOut(true);
+    fadeOutTimeoutRef.current = setTimeout(() => setMessage(''), 400);
+  };
+
   useEffect(() => {
+    const handleRipple = (e) => {
+      const button = e.currentTarget;
+      // 防止多次点击残留
+      const oldRipple = button.querySelector('.ripple');
+      if (oldRipple) oldRipple.remove();
+      const circle = document.createElement('span');
+      const diameter = Math.max(button.clientWidth, button.clientHeight);
+      const radius = diameter / 2;
+      circle.style.width = circle.style.height = `${diameter}px`;
+      circle.style.left = `${e.clientX - button.getBoundingClientRect().left - radius}px`;
+      circle.style.top = `${e.clientY - button.getBoundingClientRect().top - radius}px`;
+      circle.className = 'ripple';
+      button.appendChild(circle);
+    };
+    // 只为页面上所有button自动绑定
+    const addRippleToButtons = () => {
+      const btns = document.querySelectorAll('button, .btn-apple, .btn');
+      btns.forEach(btn => {
+        // 避免重复绑定
+        if (!btn._hasRipple) {
+          btn.addEventListener('click', handleRipple);
+          btn._hasRipple = true;
+        }
+      });
+    };
+    addRippleToButtons();
+    // 监听DOM变化，动态按钮也能自动绑定
+    const observer = new MutationObserver(addRippleToButtons);
+    observer.observe(document.body, { childList: true, subtree: true });
     return () => {
-      setPredictionImages({});
-      setPredictions([]);
-      setSelectedDataset(null);
-      setDatasetPreview(null);
+      observer.disconnect();
+      const btns = document.querySelectorAll('button, .btn-apple, .btn');
+      btns.forEach(btn => {
+        if (btn._hasRipple) {
+          btn.removeEventListener('click', handleRipple);
+          btn._hasRipple = false;
+        }
+      });
     };
   }, []);
 
-  // 在登录状态改变时清理状态
+  // 在 App 组件内部 useEffect 监听 401 事件
   useEffect(() => {
-    if (!token) {
-      setPredictionImages({});
-      setPredictions([]);
-      setSelectedDataset(null);
-      setDatasetPreview(null);
-    }
-  }, [token]);
+    const handleJwtUnauthorized = () => {
+      setToken('');
+    };
+    window.addEventListener('jwt-unauthorized', handleJwtUnauthorized);
+    return () => {
+      window.removeEventListener('jwt-unauthorized', handleJwtUnauthorized);
+    };
+  }, []);
 
   return (
-    <>
-      <div id="tech-particles-bg"></div>
-      <div className="App">
-        <h1>电力负荷预测系统</h1>
-        
-        {!token ? (
-          <div className="auth-container">
-            <div className="auth-form">
-              <div className="auth-tabs">
-                <button
-                  className={authTab === 'login' ? 'active' : ''}
-                  onClick={() => setAuthTab('login')}
-                >登录</button>
-                <button
-                  className={authTab === 'register' ? 'active' : ''}
-                  onClick={() => setAuthTab('register')}
-                >注册</button>
-              </div>
-              {authTab === 'register' ? (
-                <>
-                  <input type="text" placeholder="用户名" value={username} onChange={(e) => setUsername(e.target.value)} />
-                  <input type="password" placeholder="密码" value={password} onChange={(e) => setPassword(e.target.value)} />
-                  <button onClick={handleRegister}>注册</button>
-                </>
-              ) : (
-                <>
-                  <input type="text" placeholder="用户名" value={username} onChange={(e) => setUsername(e.target.value)} />
-                  <input type="password" placeholder="密码" value={password} onChange={(e) => setPassword(e.target.value)} />
-                  <button onClick={handleLogin}>登录</button>
-                </>
-              )}
+    <div className="app">
+      {!isLoggedIn && location.pathname !== '/' && location.pathname !== '/intro' ? (
+        <Navigate to="/" replace />
+      ) : (
+        <>
+          {/* 全局消息提示 */}
+          <GlobalMessage
+            message={message}
+            messageType={messageType}
+            messageFadeOut={messageFadeOut}
+            onClose={handleCloseMessage}
+            onMouseEnter={handleMessageMouseEnter}
+            onMouseLeave={handleMessageMouseLeave}
+          />
+          {/* 全局错误提示 */}
+          {error && (
+            <div className="global-message error">
+              {error}
+              <span className="close-btn" onClick={() => setError('')}>×</span>
             </div>
-          </div>
-        ) : (
-          <div className="main-container">
-            {renderUploadSection()}
-
-            <div className="datasets-section">
-              <h2>我的数据集</h2>
-              <div className="datasets-list">
-                {datasets.map(dataset => (
-                  <div 
-                    key={dataset.id} 
-                    className={`dataset-item ${selectedDataset === dataset.id ? 'selected' : ''}`}
-                  >
-                    <div className="dataset-item-content" onClick={() => handleDatasetSelect(dataset.id)}>
-                      <span>{dataset.filename}</span>
-                      <span className="upload-time">{dayjs(dataset.upload_time).add(8, 'hour').format('YYYY-MM-DD HH:mm:ss')}</span>
-                    </div>
-                    {confirmDeleteId === dataset.id ? (
-                      <button
-                        className="delete-button confirm"
-                        onClick={e => {
-                          e.stopPropagation();
-                          handleDeleteDataset(dataset.id);
-                        }}
-                      >确认删除</button>
-                    ) : (
-                      <button
-                        className="delete-button"
-                        onClick={e => {
-                          e.stopPropagation();
-                          setConfirmDeleteId(dataset.id);
-                        }}
-                      >删除</button>
-                    )}
-                  </div>
-                ))}
+          )}
+          {/* 预览弹窗 */}
+          <PreviewModal
+            previewVisible={previewVisible}
+            previewData={previewData}
+            onClose={() => setPreviewVisible(false)}
+          />
+          {/* 删除数据集确认弹窗 */}
+          <CSSTransition
+            in={!!confirmDeleteDatasetId}
+            timeout={350}
+            classNames="apple-modal"
+            unmountOnExit
+          >
+            <div className="confirm-dialog apple-modal">
+              <p>确定要删除该数据集吗？</p>
+              <div className="confirm-actions">
+                <button onClick={confirmDeleteDataset}>确定</button>
+                <button onClick={() => setConfirmDeleteDatasetId(null)}>取消</button>
               </div>
             </div>
-
-            {datasetPreview && (
-              <div className="preview-section">
-                <h2>数据集预览</h2>
-                <div className="dataset-info">
-                  <p>文件名：{datasetPreview.filename}</p>
-                  <p>上传时间：{dayjs(datasetPreview.upload_time).add(8, 'hour').format('YYYY-MM-DD HH:mm:ss')}</p>
-                  <p>总行数：{datasetPreview.row_count}</p>
-                  
-                  {datasetPreview.stats && (
-                    <div className="dataset-stats">
-                      <h3>数据集统计信息</h3>
-                      <div style={{ display: 'flex', gap: 32, alignItems: 'flex-start', marginTop: 8, width: '100%' }}>
-                        <div className="time-range" style={{ minWidth: 180, flexShrink: 0, margin: 0 }}>
-                          <p>时间范围：</p>
-                          <p>开始：{datasetPreview.stats.time_range.start}</p>
-                          <p>结束：{datasetPreview.stats.time_range.end}</p>
-                        </div>
-                        <div className="value-ranges" style={{ flex: 1 }}>
-                          <h4>数值范围统计：</h4>
-                          <table className="stats-table">
-                            <thead>
-                              <tr>
-                                <th>字段</th>
-                                <th>最小值</th>
-                                <th>最大值</th>
-                                <th>平均值</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {Object.entries(datasetPreview.stats.value_ranges).map(([field, stats]) => (
-                                <tr key={field}>
-                                  <td>{field}</td>
-                                  <td>{stats.min.toFixed(2)}</td>
-                                  <td>{stats.max.toFixed(2)}</td>
-                                  <td>{stats.mean.toFixed(2)}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  
-                  <h3>数据预览（前5行）：</h3>
-                  <div className="table-container">
-                    <table>
-                      <thead>
-                        <tr>
-                          {datasetPreview.columns.map(col => (
-                            <th key={col}>{col}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {datasetPreview.preview.map((row, idx) => (
-                          <tr key={idx}>
-                            {datasetPreview.columns.map(col => (
-                              <td key={col}>
-                                {col === 'date' ? row[col] : 
-                                 typeof row[col] === 'number' ? row[col].toFixed(4) : row[col]}
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  
-                  <div className="prediction-controls">
-                    <h3>预测参数设置</h3>
-                    <div className="prediction-params">
-                      <input
-                        type="text"
-                        placeholder="任务名称"
-                        value={predictionParams.task_name}
-                        onChange={(e) => setPredictionParams({
-                          ...predictionParams,
-                          task_name: e.target.value
-                        })}
-                      />
-                    </div>
-                    <button 
-                      onClick={handlePredict}
-                      disabled={predictionProgress?.status === 'running'}
-                    >
-                      {predictionProgress?.status === 'running' ? '预测中...' : '开始预测'}
-                    </button>
-                  </div>
-
-                  {predictionProgress && (
-                    <div className="prediction-progress">
-                      <h3>预测进度</h3>
-                      <div className="progress-bar">
-                        <div 
-                          className="progress-bar-fill" 
-                          style={{ width: `${predictionProgress.progress}%` }}
-                        ></div>
-                      </div>
-                      <div className="progress-info">
-                        <p>状态: {
-                          predictionProgress.status === 'running' ? '运行中' :
-                          predictionProgress.status === 'completed' ? '已完成' :
-                          predictionProgress.status === 'error' ? '出错' : '未知'
-                        }</p>
-                        <p>进度: {predictionProgress.progress}%</p>
-                      </div>
-                      <div className="output-log">
-                        <h4>输出日志：</h4>
-                        <pre className="log-content">{predictionProgress.message}</pre>
-                      </div>
-                    </div>
-                  )}
-
-                  {renderPredictionImages()}
-                  {predictions.length > 0 && (
-                    <div className="predictions-section">
-                      <h2>预测结果</h2>
-                      {predictions.map(prediction => (
-                        <div key={prediction.id} className="prediction-item">
-                          <div className="prediction-header">
-                            <h3>预测时间：{prediction.created_at}</h3>
-                            <button 
-                              className="delete-button"
-                              onClick={() => {
-                                if (window.confirm('确定要删除这个预测结果吗？')) {
-                                  handleDeletePrediction(prediction.id);
-                                }
-                              }}
-                            >
-                              删除
-                            </button>
-                          </div>
-                          {prediction.result && prediction.result.metrics && (
-                            <div className="metrics-table">
-                              <table>
-                                <thead>
-                                  <tr>
-                                    <th>指标</th>
-                                    <th>值</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {Object.entries(prediction.result.metrics).map(([key, value]) => (
-                                    <tr key={key}>
-                                      <td>{key.toUpperCase()}</td>
-                                      <td>{typeof value === 'number' ? value.toFixed(4) : value}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+          </CSSTransition>
+          <SwitchTransition mode="out-in">
+            <CSSTransition
+              key={!!token}
+              classNames="page-fade-apple"
+              timeout={600}
+              unmountOnExit
+            >
+              <div>
+                {!token ? <AuthForm
+                  authTab={authTab}
+                  setAuthTab={setAuthTab}
+                  username={username}
+                  setUsername={setUsername}
+                  password={password}
+                  setPassword={setPassword}
+                  handleLogin={handleLogin}
+                  handleRegister={handleRegister}
+                /> : renderMainContent(location)}
               </div>
-            )}
-          </div>
-        )}
-
-        {error && <p className="error-message">{error}</p>}
-        {message && (
-          <div className={`global-message ${messageType}`}>
-            {message}
-            <span className="close-btn" onClick={() => setMessage('')}>×</span>
-          </div>
-        )}
-      </div>
-    </>
+            </CSSTransition>
+          </SwitchTransition>
+        </>
+      )}
+    </div>
   );
 }
 

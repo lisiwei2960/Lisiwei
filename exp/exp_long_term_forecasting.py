@@ -141,7 +141,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         test_data, test_loader = self._get_data('test')
         if test:
             print('loading model...')
-            self.model.load_state_dict(torch.load(os.path.join(self.args.checkpoints, setting, 'checkpoint.pth')))
+            self.model.load_state_dict(torch.load(self.args.checkpoints))
         preds, trues = [], []
         folder = f"./test_results/{setting}/"
         os.makedirs(folder, exist_ok=True)

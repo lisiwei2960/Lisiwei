@@ -1,6 +1,7 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
+from flask_jwt_extended import JWTManager, jwt_required, get_jwt_identity, create_access_token, verify_jwt_in_request
 import os
 import pandas as pd
 import jwt
@@ -15,9 +16,14 @@ import torch
 from predict import get_args, main as predict_main
 from werkzeug.security import generate_password_hash, check_password_hash
 import csv
+import secrets
+from datetime import timedelta
+from flask_jwt_extended.exceptions import NoAuthorizationError
+from backend.models import db, User, Dataset, Prediction, PredictionResult, Comment
 
 app = Flask(__name__)
-# 配置CORS
+
+# CORS配置
 CORS(app, resources={
     r"/*": {
         "origins": ["http://localhost:3000"],
@@ -28,10 +34,41 @@ CORS(app, resources={
     }
 })
 
+# JWT配置
+# JWT_SECRET_KEY = secrets.token_hex(32)
+app.config['JWT_SECRET_KEY'] = 'your-very-secret-key-1234567890abcdef'
+print(f"Using fixed JWT Secret Key: {app.config['JWT_SECRET_KEY']}")
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=1)
+app.config['JWT_TOKEN_LOCATION'] = ['headers']
+app.config['JWT_HEADER_NAME'] = 'Authorization'
+app.config['JWT_HEADER_TYPE'] = 'Bearer'
+jwt = JWTManager(app)
+
+# 确保必要的目录存在
+UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'ETT')
+RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test_results')
+UPLOAD_FOLDER = 'uploads'
+PREDICTION_FOLDER = 'test_results'
+
+for folder in [UPLOAD_DIR, RESULTS_DIR, UPLOAD_FOLDER, PREDICTION_FOLDER]:
+    os.makedirs(folder, exist_ok=True)
+
+# 配置SQLite数据库
+db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'power_forecast.db')
+app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}?timeout=30'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_POOL_SIZE'] = 1
+app.config['SQLALCHEMY_POOL_TIMEOUT'] = 30
+
+# 初始化数据库
+db.init_app(app)
+
+# 存储预测任务进度
+prediction_progress = {}
+
 # 移除重复的CORS头部
 @app.after_request
 def after_request(response):
-    # 移除重复的头部
     if 'Access-Control-Allow-Origin' in response.headers:
         del response.headers['Access-Control-Allow-Origin']
     if 'Access-Control-Allow-Headers' in response.headers:
@@ -54,65 +91,118 @@ def handle_options(path):
     response.headers['Access-Control-Max-Age'] = '3600'
     return response
 
-# 存储预测任务进度
-prediction_progress = {}
+# 测试路由
+@app.route('/test', methods=['GET'])
+def test():
+    return jsonify({'message': 'API is working'})
 
-# 确保必要的目录存在
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'ETT')
-RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test_results')
+# 预测数据路由
+@app.route('/prediction_data/<dataset>', methods=['GET'])
+@jwt_required()
+def get_prediction_data(dataset):
+    """从数据库获取预测结果数据"""
+    try:
+        results = PredictionResult.query.filter_by(dataset_name=dataset).order_by(PredictionResult.time).all()
+        
+        if not results:
+            return jsonify({'error': '未找到预测数据'}), 404
+            
+        data = [result.to_dict() for result in results]
+            
+        return jsonify({
+            'status': 'success',
+            'data': data
+        })
+        
+    except Exception as e:
+        print(f"获取预测数据时出错: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(RESULTS_DIR, exist_ok=True)
+# 预测图片路由
+@app.route('/prediction_image/<dataset>/<filename>', methods=['GET'])
+@jwt_required()
+def get_prediction_file(dataset, filename):
+    """处理预测结果文件的请求（仅图片）"""
+    try:
+        file_path = os.path.join(PREDICTION_FOLDER, dataset, filename)
+        print(f"尝试访问文件: {file_path}")
+        
+        if not os.path.exists(file_path):
+            print(f"文件不存在: {file_path}")
+            return jsonify({'error': f'文件 {filename} 不存在'}), 404
+            
+        directory = os.path.dirname(file_path)
+        base_filename = os.path.basename(file_path)
+        
+        if filename.endswith('.png'):
+            return send_from_directory(
+                directory,
+                base_filename,
+                mimetype='image/png'
+            )
+        else:
+            return jsonify({'error': '不支持的文件类型'}), 400
+            
+    except Exception as e:
+        print(f"处理文件请求时出错: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-# 配置SQLite数据库
-db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'power_forecast.db')
-app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-# 初始化数据库
-db = SQLAlchemy(app)
-
-def init_db_once():
-    """仅在数据库文件不存在时初始化表结构，不删除已有数据"""
-    db_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'power_forecast.db')
-    if not os.path.exists(db_file):
-        print(f"数据库文件不存在，自动初始化表结构: {db_file}")
-        with app.app_context():
-            db.create_all()
-            print("Created new tables")
-
-# 用户模型
-class User(db.Model):
-    __tablename__ = 'user'
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
-    password_hash = db.Column(db.String(120), nullable=False)
-    datasets = db.relationship('Dataset', backref='user', lazy=True, cascade='all, delete-orphan')
-
-# 预测结果模型（先定义因为被Dataset引用）
-class Prediction(db.Model):
-    __tablename__ = 'prediction'
-    id = db.Column(db.Integer, primary_key=True)
-    dataset_id = db.Column(db.Integer, db.ForeignKey('dataset.id', ondelete='CASCADE'), nullable=False)
-    prediction_time = db.Column(db.DateTime, nullable=False, default=datetime.datetime.utcnow)
-    result = db.Column(db.Text, nullable=False)  # 存储预测结果
-    parameters = db.Column(db.Text, nullable=False)  # 存储预测参数
-
-# 数据集模型
-class Dataset(db.Model):
-    __tablename__ = 'dataset'
-    id = db.Column(db.Integer, primary_key=True)
-    filename = db.Column(db.String(120), nullable=False)
-    upload_time = db.Column(db.DateTime, nullable=False, default=datetime.datetime.utcnow)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
-    data = db.Column(db.Text, nullable=False)  # 存储CSV数据
-    predictions = db.relationship('Prediction', backref='dataset', lazy=True, cascade='all, delete-orphan')
-
-# 密钥，用于JWT
-SECRET_KEY = 'your-secret-key'
-
-# 初始化数据库（只在数据库文件不存在时自动初始化）
-init_db_once()
+def import_prediction_results(dataset_id, source_dir):
+    """导入预测结果到数据库"""
+    try:
+        print(f"开始导入预测结果到数据库，数据集ID: {dataset_id}")
+        # 查找所有预测结果CSV文件
+        for feature_num in range(3):
+            csv_file = glob.glob(os.path.join(source_dir, f'*_prediction_vs_groundtruth_feature_{feature_num}.csv'))
+            if not csv_file:
+                print(f"找不到特征 {feature_num} 的预测结果文件")
+                continue
+                
+            csv_path = csv_file[0]
+            print(f"处理文件: {csv_path}")
+            
+            try:
+                # 读取CSV文件
+                df = pd.read_csv(csv_path)
+                print(f"读取CSV文件成功，列名: {df.columns.tolist()}")
+                
+                # 删除该数据集之前的预测结果
+                PredictionResult.query.filter_by(
+                    dataset_name=str(dataset_id),
+                    feature_index=feature_num
+                ).delete()
+                
+                # 导入新的预测结果
+                for _, row in df.iterrows():
+                    result = PredictionResult(
+                        dataset_name=str(dataset_id),
+                        feature_index=feature_num,
+                        time=str(row['Time']),
+                        prediction=float(row['Prediction']),
+                        actual=float(row['Groundtruth']),
+                        error=float(row['Absolute_Error'])
+                    )
+                    db.session.add(result)
+                
+                print(f"特征 {feature_num} 的预测结果导入成功")
+                
+            except Exception as e:
+                print(f"处理文件 {csv_path} 时出错: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        # 提交所有更改
+        db.session.commit()
+        print("所有预测结果导入完成")
+        return True
+        
+    except Exception as e:
+        print(f"导入预测结果时出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        db.session.rollback()
+        return False
 
 def run_prediction_task(dataset_path, model_name, prediction_id):
     """在后台运行预测任务"""
@@ -124,7 +214,7 @@ def run_prediction_task(dataset_path, model_name, prediction_id):
                 return
                 
             prediction_progress[prediction_id] = {
-                'status': 'running',
+                'status': '预测中...',
                 'progress': 0,
                 'message': '开始预测...'
             }
@@ -152,12 +242,37 @@ def run_prediction_task(dataset_path, model_name, prediction_id):
             args.features = 'M'
             args.seq_len = 96
             args.label_len = 48
-            args.pred_len = 6
             args.batch_size = 32
             args.model_id = 'TimesNet'
+            args.d_model = 16
+            args.n_heads = 8
+            args.e_layers = 2
+            args.d_ff = 32
+            args.dropout = 0.05
+            args.enc_in = 3
+            args.dec_in = 3
+            args.c_out = 3
+            args.num_kernels = 6
 
-            # 设置模型权重路径为TimeXer6.pth
-            model_path = r'E:/学习/基于大模型的电力负荷预测方法研究与开发/系统/临时版/时间序列集合/checkpoints/TimeXer6.pth'
+            # 根据model_name动态设置预测长度和模型权重路径
+            if model_name == 'TimeXer6':
+                args.pred_len = 6
+                model_path = './checkpoints/TimeXer6.pth'
+                hour_str = '6h'
+            elif model_name == 'TimeXer12':
+                args.pred_len = 12
+                model_path = './checkpoints/TimeXer12.pth'
+                hour_str = '12h'
+            elif model_name == 'TimeXer24':
+                args.pred_len = 24
+                model_path = './checkpoints/TimeXer24.pth'
+                hour_str = '24h'
+            else:
+                # 默认6小时
+                args.pred_len = 6
+                model_path = './checkpoints/TimeXer6.pth'
+                hour_str = '6h'
+
             print(f"使用模型文件: {model_path}")
             if not os.path.exists(model_path):
                 raise FileNotFoundError(f"模型文件不存在: {model_path}")
@@ -175,8 +290,25 @@ def run_prediction_task(dataset_path, model_name, prediction_id):
                     'progress': percent,
                     'message': msg
                 })
+
             # 运行预测
-            metrics = predict_main(args, progress_callback=progress_callback)
+            try:
+                metrics = predict_main(args, progress_callback=progress_callback)
+                if not metrics:
+                    raise Exception("预测失败：没有得到有效的预测结果")
+            except Exception as e:
+                print(f"预测过程出错: {str(e)}")
+                prediction_progress[prediction_id].update({
+                    'status': 'error',
+                    'progress': 0,
+                    'message': f'预测失败: {str(e)}'
+                })
+                prediction.result = json.dumps({
+                    'status': 'error',
+                    'error': str(e)
+                })
+                db.session.commit()
+                return
 
             # 转换metrics为float类型
             if metrics:
@@ -184,166 +316,131 @@ def run_prediction_task(dataset_path, model_name, prediction_id):
                     if isinstance(metrics[k], (np.floating, np.float32, np.float64)):
                         metrics[k] = float(metrics[k])
 
-            # 创建数据集特定的结果目录
-            dataset_results_dir = os.path.join(RESULTS_DIR, str(prediction.dataset_id))
+            # 创建数据集特定的结果目录（每次预测独立子目录）
+            sub_dir = f"{model_name}"
+            dataset_results_dir = os.path.join(RESULTS_DIR, str(prediction.dataset_id), sub_dir)
             os.makedirs(dataset_results_dir, exist_ok=True)
 
-            # 动态获取数据集名，拼接图片目录
+            # 动态获取数据集名，拼接图片目录（hour_str动态变化）
             dataset_name = os.path.splitext(os.path.basename(args.data_path))[0]
-            source_dir = f'test_results/{dataset_name}_long_term_forecast_ETTh1_6h_TimesNet_ETTh1_ftM_sl96_ll48_pl6_dm16_nh8_el2_dl1_df32_expand2_dc4_fc3_ebtimeF_dtTrue_Exp_0'
+            source_dir = f'test_results/{dataset_name}_long_term_forecast_ETTh1_{hour_str}_TimesNet_ETTh1_ftM_sl96_ll48_pl{args.pred_len}_dm16_nh8_el2_dl1_df32_expand2_dc4_fc3_ebtimeF_dtTrue_Exp_0'
             print(f"查找源目录: {source_dir}")
             
-            moved_files = []  # 保证无论是否进入if分支都已定义
-            if os.path.exists(source_dir):
-                print(f"源目录存在，开始处理预测结果...")
-                
-                # 调用analyze_predictions.py处理预测结果
-                try:
-                    # 准备输入文件路径（使用绝对路径）
-                    pred_path = os.path.abspath(os.path.join(source_dir, 'prediction.npy'))
-                    true_path = os.path.abspath(os.path.join(source_dir, 'groundtruth.npy'))
-                    
-                    print(f"预测文件路径: {pred_path}")
-                    print(f"真实值文件路径: {true_path}")
-                    
-                    if os.path.exists(pred_path) and os.path.exists(true_path):
-                        # 生成对比图和分析结果
-                        print("开始生成预测对比图...")
-                        from analyze_predictions import analyze_and_visualize
-                        analysis_results = analyze_and_visualize(pred_path, true_path, source_dir)
-                        print("预测对比图生成完成")
-                        print(f"分析结果: {analysis_results}")
-                        
-                        # 将所有numpy类型转换为Python原生类型
-                        converted_results = {}
-                        for key, value in analysis_results.items():
-                            if isinstance(value, (np.floating, np.float32, np.float64)):
-                                converted_results[key] = float(value)
-                            else:
-                                converted_results[key] = value
-                        metrics.update(converted_results)
-                        
-                        # 移动生成的预测结果文件
-                        result_files = {
-                            'prediction_vs_groundtruth.png': '预测对比图',
-                            'prediction_vs_groundtruth.csv': '预测结果数据'
-                        }
-                        
-                        moved_files = []
-                        for filename, file_desc in result_files.items():
-                            source_path = os.path.join(source_dir, filename)
-                            if os.path.exists(source_path):
-                                print(f"找到{file_desc}: {source_path}")
-                                
-                                # 确保目标目录存在
-                                os.makedirs(dataset_results_dir, exist_ok=True)
-                                print(f"确保目标目录存在: {dataset_results_dir}")
-                                
-                                # 生成带时间戳的新文件名
-                                timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-                                new_filename = f"{timestamp}_{filename}"
-                                target_path = os.path.join(dataset_results_dir, new_filename)
-                                
-                                try:
-                                    print(f"复制文件: {source_path} -> {target_path}")
-                                    shutil.copy2(source_path, target_path)
-                                    moved_files.append(new_filename)
-                                    print(f"{file_desc}复制成功")
-                                    
-                                    # 验证目标文件是否存在
-                                    if os.path.exists(target_path):
-                                        print(f"确认：目标文件已成功创建: {target_path}")
-                                    else:
-                                        print(f"错误：目标文件未能创建: {target_path}")
-                                except Exception as e:
-                                    print(f"复制{file_desc}时出错: {str(e)}")
-                                    import traceback
-                                    traceback.print_exc()
-                            else:
-                                print(f"警告：{file_desc}不存在: {source_path}")
+            # 调用 analyze_predictions.py 处理 .npy 文件
+            try:
+                groundtruth_path = os.path.join(source_dir, 'groundtruth.npy')
+                prediction_path = os.path.join(source_dir, 'prediction.npy')
+                if os.path.exists(groundtruth_path) and os.path.exists(prediction_path):
+                    print("开始处理预测结果...")
+                    analyze_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'analyze_predictions.py')
+                    subprocess.run([
+                        'python', 
+                        analyze_script,
+                        '--true_path', groundtruth_path,
+                        '--pred_path', prediction_path,
+                        '--output_dir', source_dir
+                    ], check=True)
+                    print("预测结果处理完成")
+                else:
+                    print(f"警告：找不到预测结果文件")
+                    if not os.path.exists(groundtruth_path):
+                        print(f"groundtruth.npy 不存在: {groundtruth_path}")
+                    if not os.path.exists(prediction_path):
+                        print(f"prediction.npy 不存在: {prediction_path}")
+            except Exception as e:
+                print(f"处理预测结果时出错: {str(e)}")
+                import traceback
+                traceback.print_exc()
 
-                        # 更新预测记录
+            moved_files = []
+            # 查找所有特征的预测结果文件
+            for feature_num in range(3):
+                result_files = {
+                    f'prediction_vs_groundtruth_feature_{feature_num}.png': f'特征{feature_num}预测对比图',
+                    f'prediction_vs_groundtruth_feature_{feature_num}.csv': f'特征{feature_num}预测结果数据'
+                }
+                for filename, file_desc in result_files.items():
+                    source_path = os.path.join(source_dir, filename)
+                    if os.path.exists(source_path):
+                        print(f"找到{file_desc}: {source_path}")
+                        # 确保目标目录存在
+                        os.makedirs(dataset_results_dir, exist_ok=True)
+                        print(f"确保目标目录存在: {dataset_results_dir}")
+                        # 生成带时间戳的新文件名
+                        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                        new_filename = f"{timestamp}_{os.path.basename(source_path)}"
+                        new_path = os.path.join(dataset_results_dir, new_filename)
                         try:
-                            prediction_result = {
-                                'status': 'completed',
-                                'metrics': metrics,
-                                'message': '预测完成',
-                                'image_files': moved_files
-                            }
-                            prediction.result = json.dumps(prediction_result)
-                            db.session.commit()
-                            print(f"预测记录已更新，移动的文件列表: {moved_files}")
-
-                            # 更新进度
-                            prediction_progress[prediction_id].update({
-                                'status': 'completed',
-                                'progress': 100,
-                                'message': '预测完成',
-                                'metrics': metrics,
-                                'image_files': moved_files
-                            })
+                            print(f"复制文件: {source_path} -> {new_path}")
+                            shutil.copy2(source_path, new_path)
+                            moved_files.append(f"{sub_dir}/{new_filename}")
                         except Exception as e:
-                            print(f"更新预测记录时出错: {str(e)}")
+                            print(f"复制文件失败: {str(e)}")
+                            import traceback
                             traceback.print_exc()
                     else:
-                        print(f"警告：对比图文件不存在: {source_path}")
-                        print("列出源目录中的文件:")
-                        for file in os.listdir(source_dir):
-                            print(f"- {file}")
-                except Exception as e:
-                    print(f"生成预测对比图时出错: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-            else:
-                print(f"源目录不存在: {source_dir}")
+                        print(f"警告：{file_desc}不存在: {source_path}")
 
-            # === 新增：保存指标到 CSV ===
-            metrics_csv_path = os.path.join(RESULTS_DIR, 'metrics.csv')
-            metrics_row = {
-                'prediction_id': prediction.id,
-                'dataset_id': prediction.dataset_id,
-                'mae': metrics.get('mae'),
-                'mse': metrics.get('mse'),
-                'rmse': metrics.get('rmse'),
-                'mape': metrics.get('mape'),
-                'mspe': metrics.get('mspe'),
-                'created_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            }
-            write_header = not os.path.exists(metrics_csv_path)
-            with open(metrics_csv_path, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=list(metrics_row.keys()))
-                if write_header:
-                    writer.writeheader()
-                writer.writerow(metrics_row)
-            # === 新增结束 ===
+            # 更新预测记录
+            try:
+                prediction_result = {
+                    'status': 'completed',
+                    'metrics': metrics,
+                    'message': '预测完成',
+                    'image_files': moved_files
+                }
+                prediction.result = json.dumps(prediction_result)
+                db.session.commit()
+                print(f"预测记录已更新，移动的文件列表: {moved_files}")
 
+                # 更新进度
+                prediction_progress[prediction_id].update({
+                    'status': 'completed',
+                    'progress': 100,
+                    'message': '预测完成',
+                    'metrics': metrics,
+                    'image_files': moved_files
+                })
+            except Exception as e:
+                print(f"更新预测记录时出错: {str(e)}")
+                import traceback
+                traceback.print_exc()
         except Exception as e:
             print(f"预测任务出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
             prediction_progress[prediction_id] = {
                 'status': 'error',
                 'progress': 0,
                 'message': f'预测失败: {str(e)}'
             }
             if prediction:
-                prediction.result = json.dumps({
-                    'status': 'error',
-                    'error': str(e)
-                })
-                db.session.commit()
-
+                try:
+                    prediction.result = json.dumps({
+                        'status': 'error',
+                        'error': str(e)
+                    })
+                    db.session.commit()
+                except:
+                    db.session.rollback()
         finally:
-            # 清理临时文件
             try:
+                # 清理临时文件
                 if os.path.exists(dataset_path):
                     os.remove(dataset_path)
                 if os.path.exists(target_path):
                     os.remove(target_path)
             except Exception as e:
                 print(f"清理临时文件失败: {str(e)}")
+            
+            try:
+                db.session.close()
+            except:
+                pass
 
 def validate_dataset(df):
     """验证数据集格式是否正确"""
-    required_columns = ['date', 'HUFL', 'HULL', 'MUFL', 'MULL', 'LUFL', 'LULL', 'OT']
+    required_columns = ['date', 'HUFL', 'MUFL', 'LUFL']  # 使用这三个特征
     missing_columns = [col for col in required_columns if col not in df.columns]
     
     if missing_columns:
@@ -356,7 +453,7 @@ def validate_dataset(df):
         raise ValueError("date列的格式不正确，应为yyyy-MM-dd HH:mm:ss格式")
     
     # 验证数值列
-    numeric_columns = ['HUFL', 'HULL', 'MUFL', 'MULL', 'LUFL', 'LULL', 'OT']
+    numeric_columns = ['HUFL', 'MUFL', 'LUFL']  # 验证这三个特征
     for col in numeric_columns:
         if not pd.to_numeric(df[col], errors='coerce').notnull().all():
             raise ValueError(f"{col}列包含非数值数据")
@@ -365,6 +462,9 @@ def process_dataset(df):
     """预处理数据集"""
     # 确保日期列格式正确
     df['date'] = pd.to_datetime(df['date'])
+    
+    # 只保留需要的列
+    df = df[['date', 'HUFL', 'MUFL', 'LUFL']]
     
     # 按时间排序
     df = df.sort_values('date')
@@ -396,9 +496,11 @@ def register():
         if User.query.filter_by(username=username).first():
             return jsonify({'error': '用户已存在'}), 400
         
+        is_admin = (username == 'admin')
         user = User(
             username=username,
-            password_hash=generate_password_hash(password)
+            password_hash=generate_password_hash(password),
+            is_admin=is_admin
         )
         db.session.add(user)
         db.session.commit()
@@ -410,155 +512,181 @@ def register():
 # 用户登录
 @app.route('/login', methods=['POST'])
 def login():
-    data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
-    
-    user = User.query.filter_by(username=username).first()
-    if not user or not check_password_hash(user.password_hash, password):
-        return jsonify({'error': '用户名或密码错误'}), 401
-    
-    token = jwt.encode(
-        {'user_id': user.id, 'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=1)},
-        SECRET_KEY,
-        algorithm='HS256'
-    )
-    return jsonify({'token': token}), 200
-
-# 验证token的装饰器
-def token_required(f):
-    def decorated(*args, **kwargs):
-        token = request.headers.get('Authorization')
-        if not token:
-            return jsonify({'error': '没有提供token'}), 401
-        try:
-            data = jwt.decode(token.split(' ')[1], SECRET_KEY, algorithms=['HS256'])
-            current_user = User.query.get(data['user_id'])
-        except:
-            return jsonify({'error': 'token无效或已过期'}), 401
-        return f(current_user, *args, **kwargs)
-    decorated.__name__ = f.__name__
-    return decorated
+    try:
+        # 检查请求体是否为空或不是JSON格式
+        if not request.is_json:
+            return jsonify({"error": "缺少JSON数据"}), 400
+        
+        username = request.json.get('username', None)
+        password = request.json.get('password', None)
+        
+        # 验证必填字段
+        if not username:
+            return jsonify({"error": "请提供用户名"}), 400
+        if not password:
+            return jsonify({"error": "请提供密码"}), 400
+            
+        # 查询用户
+        user = User.query.filter_by(username=username).first()
+        
+        # 验证用户和密码
+        if not user or not check_password_hash(user.password_hash, password):
+            return jsonify({"error": "用户名或密码不正确"}), 401
+        
+        # 更新最后登录时间为北京时间
+        user.last_login = datetime.datetime.utcnow() + timedelta(hours=8)
+        db.session.commit()
+        
+        # 创建访问令牌
+        access_token = create_access_token(identity=user.id)
+        
+        return jsonify({
+            "token": access_token,
+            "username": user.username,
+            "is_admin": user.is_admin
+        }), 200
+            
+    except Exception as e:
+        print(f"登录失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "登录处理时发生错误"}), 500
 
 # 上传数据集
 @app.route('/upload', methods=['POST'])
-@token_required
-def upload_dataset(current_user):
-    if 'file' not in request.files:
-        return jsonify({'error': '没有文件'}), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': '没有选择文件'}), 400
-    
-    if not file.filename.endswith('.csv'):
-        return jsonify({'error': '只支持CSV格式的文件'}), 400
-    
+@jwt_required()
+def upload_dataset():
     try:
-        # 读取CSV文件内容
-        df = pd.read_csv(file)
+        # 获取当前用户ID
+        current_user_id = get_jwt_identity()
+        print(f"当前用户ID: {current_user_id}")
         
-        # 验证数据集格式
-        validate_dataset(df)
+        if 'file' not in request.files:
+            return jsonify({'error': '没有文件'}), 400
         
-        # 预处理数据集
-        df = process_dataset(df)
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': '没有选择文件'}), 400
         
-        # 计算基本统计信息
-        stats = {
-            'total_rows': len(df),
-            'time_range': {
-                'start': df['date'].min().strftime('%Y-%m-%d %H:%M:%S'),
-                'end': df['date'].max().strftime('%Y-%m-%d %H:%M:%S')
-            },
-            'value_ranges': {
-                col: {
-                    'min': float(df[col].min()),
-                    'max': float(df[col].max()),
-                    'mean': float(df[col].mean())
-                } for col in ['HUFL', 'HULL', 'MUFL', 'MULL', 'LUFL', 'LULL', 'OT']
+        if not file.filename.endswith('.csv'):
+            return jsonify({'error': '只支持CSV格式的文件'}), 400
+        
+        try:
+            # 读取CSV文件内容
+            df = pd.read_csv(file)
+            
+            # 验证数据集格式
+            validate_dataset(df)
+            
+            # 预处理数据集
+            df = process_dataset(df)
+            
+            # 计算基本统计信息
+            stats = {
+                'total_rows': len(df),
+                'time_range': {
+                    'start': df['date'].min().strftime('%Y-%m-%d %H:%M:%S'),
+                    'end': df['date'].max().strftime('%Y-%m-%d %H:%M:%S')
+                },
+                'value_ranges': {
+                    col: {
+                        'min': float(df[col].min()),
+                        'max': float(df[col].max()),
+                        'mean': float(df[col].mean())
+                    } for col in ['HUFL', 'MUFL', 'LUFL']
+                }
             }
-        }
-        
-        # 保存处理后的数据
-        temp_file = os.path.join(UPLOAD_DIR, f'temp_{current_user.id}_{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}.csv')
-        df.to_csv(temp_file, index=False)
-        
-        # 将DataFrame转换为JSON字符串存储
-        dataset = Dataset(
-            filename=file.filename,
-            user_id=current_user.id,
-            data=df.to_json(orient='records', date_format='iso')
-        )
-        db.session.add(dataset)
-        db.session.commit()
-        
-        return jsonify({
-            'message': '数据集上传成功',
-            'dataset_id': dataset.id,
-            'filename': dataset.filename,
-            'stats': stats
-        }), 201
-        
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
+            
+            # 保存处理后的数据
+            temp_file = os.path.join(UPLOAD_DIR, f'temp_{current_user_id}_{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}.csv')
+            df.to_csv(temp_file, index=False)
+            
+            # 将DataFrame转换为JSON字符串存储
+            dataset = Dataset(
+                filename=file.filename,
+                user_id=current_user_id,
+                data=df.to_json(orient='records', date_format='iso')
+            )
+            db.session.add(dataset)
+            db.session.commit()
+            
+            return jsonify({
+                'message': '数据集上传成功',
+                'dataset_id': dataset.id,
+                'filename': dataset.filename,
+                'stats': stats
+            }), 201
+            
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+        except Exception as e:
+            print(f"处理文件时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({'error': f'文件处理错误: {str(e)}'}), 400
+            
     except Exception as e:
-        return jsonify({'error': f'文件处理错误: {str(e)}'}), 400
+        print(f"上传数据集时出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'上传失败: {str(e)}'}), 500
+
+def format_datetime(dt):
+    """返回时间字符串，去掉微秒部分"""
+    return dt.strftime('%Y-%m-%d %H:%M:%S')
 
 # 获取用户的数据集列表
 @app.route('/datasets', methods=['GET'])
-@token_required
-def get_datasets(current_user):
-    datasets = Dataset.query.filter_by(user_id=current_user.id).all()
-    return jsonify({
-        'datasets': [{
-            'id': ds.id,
-            'filename': ds.filename,
-            'upload_time': ds.upload_time.strftime('%Y-%m-%d %H:%M:%S')
-        } for ds in datasets]
-    }), 200
+@jwt_required()
+def get_datasets():
+    try:
+        # 获取当前用户ID
+        current_user_id = get_jwt_identity()
+        print(f"获取数据集列表，用户ID: {current_user_id}")
+        
+        datasets = Dataset.query.filter_by(user_id=current_user_id).all()
+        return jsonify({
+            'datasets': [{
+                'id': ds.id,
+                'filename': ds.filename,
+                'upload_time': format_datetime(ds.upload_time)
+            } for ds in datasets]
+        }), 200
+    except Exception as e:
+        print(f"获取数据集列表时出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'获取数据集列表失败: {str(e)}'}), 500
 
 # 获取数据集详情
 @app.route('/datasets/<int:dataset_id>', methods=['GET'])
-@token_required
-def get_dataset(current_user, dataset_id):
-    dataset = Dataset.query.get_or_404(dataset_id)
-    if dataset.user_id != current_user.id:
-        return jsonify({'error': '无权访问此数据集'}), 403
-    
-    # 将JSON字符串转换回DataFrame
-    df = pd.read_json(dataset.data, orient='records')
-    df['date'] = pd.to_datetime(df['date'])
-    
-    # 计算统计信息
-    stats = {
-        'total_rows': len(df),
-        'time_range': {
-            'start': df['date'].min().strftime('%Y-%m-%d %H:%M:%S'),
-            'end': df['date'].max().strftime('%Y-%m-%d %H:%M:%S')
-        },
-        'value_ranges': {
-            col: {
-                'min': float(df[col].min()),
-                'max': float(df[col].max()),
-                'mean': float(df[col].mean())
-            } for col in ['HUFL', 'HULL', 'MUFL', 'MULL', 'LUFL', 'LULL', 'OT']
-        }
-    }
-    
-    return jsonify({
-        'filename': dataset.filename,
-        'upload_time': dataset.upload_time.strftime('%Y-%m-%d %H:%M:%S'),
-        'preview': df.head().to_dict('records'),
-        'columns': df.columns.tolist(),
-        'row_count': len(df),
-        'stats': stats
-    }), 200
+@jwt_required()
+def get_dataset(dataset_id):
+    try:
+        # 获取当前用户ID
+        current_user_id = get_jwt_identity()
+        print(f"获取数据集详情，用户ID: {current_user_id}, 数据集ID: {dataset_id}")
+        
+        dataset = Dataset.query.filter_by(id=dataset_id, user_id=current_user_id).first()
+        if not dataset:
+            return jsonify({'error': '数据集不存在'}), 404
+            
+        return jsonify({
+            'id': dataset.id,
+            'filename': dataset.filename,
+            'upload_time': format_datetime(dataset.upload_time),
+            'data': dataset.data
+        })
+    except Exception as e:
+        print(f"获取数据集详情时出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'获取数据集详情失败: {str(e)}'}), 500
 
 # 获取可用模型列表
 @app.route('/api/models', methods=['GET'])
-@token_required
-def get_models(current_user):
+@jwt_required()
+def get_models():
     """获取可用的模型列表"""
     try:
         models = [
@@ -593,16 +721,9 @@ def get_prediction_progress(prediction_id):
         
     try:
         # 验证token
-        token = request.headers.get('Authorization')
-        if not token:
-            return jsonify({'error': '没有提供token'}), 401
-        try:
-            data = jwt.decode(token.split(' ')[1], SECRET_KEY, algorithms=['HS256'])
-            current_user = User.query.get(data['user_id'])
-            if not current_user:
-                return jsonify({'error': '用户不存在'}), 401
-        except:
-            return jsonify({'error': 'token无效或已过期'}), 401
+        verify_jwt_in_request()  # 添加此行来验证 JWT token
+        current_user_id = get_jwt_identity()
+        print(f"获取预测进度，用户ID: {current_user_id}, 预测ID: {prediction_id}")
 
         prediction = Prediction.query.get_or_404(prediction_id)
         dataset = Dataset.query.get(prediction.dataset_id)
@@ -610,7 +731,7 @@ def get_prediction_progress(prediction_id):
         if not dataset:
             return jsonify({'error': '找不到相关数据集'}), 404
             
-        if dataset.user_id != current_user.id:
+        if dataset.user_id != current_user_id:
             return jsonify({'error': '无权访问此预测任务'}), 403
         
         progress = prediction_progress.get(prediction_id, {
@@ -622,31 +743,39 @@ def get_prediction_progress(prediction_id):
         return jsonify(progress), 200
     except Exception as e:
         print(f"获取预测进度时出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': f'获取预测进度失败: {str(e)}'}), 500
 
 # 获取数据集的预测图片
 @app.route('/prediction_images/<int:dataset_id>', methods=['GET'])
-@token_required
-def get_dataset_images(current_user, dataset_id):
+@jwt_required()
+def get_dataset_images(dataset_id):
     """获取指定数据集的预测图片"""
     try:
+        # 获取当前用户ID
+        current_user_id = get_jwt_identity()
+        print(f"获取数据集预测图片，用户ID: {current_user_id}, 数据集ID: {dataset_id}")
+        
         dataset = Dataset.query.get_or_404(dataset_id)
-        if dataset.user_id != current_user.id:
+        if dataset.user_id != current_user_id:
             return jsonify({'error': '无权访问此数据集'}), 403
 
         # 构建图片目录路径
         dataset_results_dir = os.path.join(RESULTS_DIR, str(dataset_id))
         print(f"查找图片目录: {dataset_results_dir}")
         
-        # 如果目录存在，获取所有png图片
+        # 如果目录存在，递归列出所有文件
         images = []
         if os.path.exists(dataset_results_dir):
-            print(f"目录存在，列出所有文件:")
-            for file in os.listdir(dataset_results_dir):
-                print(f"- {file}")
-                if file.endswith('.png'):
-                    images.append(file)
-            images.sort(reverse=True)  # 最新的图片排在前面
+            print(f"目录存在，递归列出所有文件:")
+            for root, dirs, files in os.walk(dataset_results_dir):
+                for file in files:
+                    if file.endswith('.png'):
+                        rel_path = os.path.relpath(os.path.join(root, file), dataset_results_dir)
+                        # 返回相对dataset_results_dir的路径，前端拼接时自动带子目录
+                        images.append(rel_path.replace('\\', '/'))
+            images.sort(reverse=True)
             print(f"找到 {len(images)} 个PNG图片: {images}")
         else:
             print(f"警告：图片目录不存在: {dataset_results_dir}")
@@ -687,89 +816,96 @@ def get_prediction_image(dataset_id, image_name):
 
 # 删除数据集
 @app.route('/datasets/<int:dataset_id>', methods=['DELETE'])
-@token_required
-def delete_dataset(current_user, dataset_id):
-    dataset = Dataset.query.get_or_404(dataset_id)
-    if dataset.user_id != current_user.id:
-        return jsonify({'error': '无权删除此数据集'}), 403
-    
+@jwt_required()
+def delete_dataset(dataset_id):
     try:
-        # 删除相关的预测结果图片
-        task_names = set()
-        for pred in dataset.predictions:
-            try:
-                pred_data = json.loads(pred.result)
-                if 'task_name' in pred_data:
-                    task_names.add(pred_data['task_name'])
-            except:
-                pass
+        # 获取当前用户ID
+        current_user_id = get_jwt_identity()
+        print(f"删除数据集，用户ID: {current_user_id}, 数据集ID: {dataset_id}")
         
-        for task_name in task_names:
-            result_dir = os.path.join('test_results', task_name)
-            if os.path.exists(result_dir):
-                for file in os.listdir(result_dir):
-                    try:
-                        os.remove(os.path.join(result_dir, file))
-                    except:
-                        pass
+        dataset = Dataset.query.get_or_404(dataset_id)
+        if dataset.user_id != current_user_id:
+            return jsonify({'error': '无权删除此数据集'}), 403
+        
+        try:
+            # 删除预测结果目录
+            results_dir = os.path.join(RESULTS_DIR, str(dataset_id))
+            if os.path.exists(results_dir):
+                print(f"删除预测结果目录: {results_dir}")
                 try:
-                    os.rmdir(result_dir)
-                except:
-                    pass
+                    shutil.rmtree(results_dir)
+                except Exception as e:
+                    print(f"删除预测结果目录时出错: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
 
-        # 删除数据集（会自动删除相关的预测记录）
-        db.session.delete(dataset)
-        db.session.commit()
-        
-        return jsonify({'message': '数据集删除成功'}), 200
+            # 删除数据集文件
+            dataset_file = os.path.join(UPLOAD_DIR, f'temp_{dataset_id}_*.csv')
+            for file in glob.glob(dataset_file):
+                try:
+                    os.remove(file)
+                    print(f"删除数据集文件: {file}")
+                except Exception as e:
+                    print(f"删除数据集文件时出错: {str(e)}")
+
+            # 删除数据库记录（会自动删除相关的预测记录）
+            db.session.delete(dataset)
+            db.session.commit()
+            
+            return jsonify({'message': '数据集删除成功'}), 200
+        except Exception as e:
+            print(f"删除数据集过程中出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            db.session.rollback()
+            return jsonify({'error': f'删除失败: {str(e)}'}), 500
     except Exception as e:
-        db.session.rollback()
+        print(f"删除数据集时出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': f'删除失败: {str(e)}'}), 500
 
-# 获取预测历史
+# 获取预测历史（返回所有历史预测记录）
 @app.route('/predictions', methods=['GET'])
-@token_required
-def get_predictions(current_user):
+@jwt_required()
+def get_predictions():
     try:
+        # 获取当前用户ID
+        current_user_id = get_jwt_identity()
+        print(f"获取预测历史，用户ID: {current_user_id}")
+        
         # 获取用户的所有数据集
-        datasets = Dataset.query.filter_by(user_id=current_user.id).all()
+        datasets = Dataset.query.filter_by(user_id=current_user_id).all()
         dataset_ids = [ds.id for ds in datasets]
         
-        # 获取每个数据集最新的预测记录
-        latest_predictions = {}
-        for dataset_id in dataset_ids:
-            latest_pred = Prediction.query.filter_by(dataset_id=dataset_id)\
-                .order_by(Prediction.prediction_time.desc())\
-                .first()
-            if latest_pred:
-                latest_predictions[dataset_id] = latest_pred
+        # 获取所有预测记录，按时间倒序排列
+        all_predictions = Prediction.query.filter(Prediction.dataset_id.in_(dataset_ids))\
+            .order_by(Prediction.prediction_time.desc()).all()
         
         # 构建响应数据
         predictions_data = []
-        for dataset_id, pred in latest_predictions.items():
-            dataset = Dataset.query.get(dataset_id)
+        for pred in all_predictions:
+            dataset = Dataset.query.get(pred.dataset_id)
             result = json.loads(pred.result) if pred.result else {}
             parameters = json.loads(pred.parameters) if pred.parameters else {}
-            
+
             prediction_data = {
                 'id': pred.id,
                 'dataset_id': pred.dataset_id,
                 'dataset_name': dataset.filename if dataset else 'Unknown',
                 'model': parameters.get('model', 'Unknown'),
+                'parameters': parameters,
                 'status': result.get('status', 'unknown'),
-                'created_at': pred.prediction_time.strftime('%Y-%m-%d %H:%M:%S'),
+                'created_at': format_datetime(pred.prediction_time),
                 'result': result
             }
             predictions_data.append(prediction_data)
-        
-        # 按预测时间倒序排序
-        predictions_data.sort(key=lambda x: x['created_at'], reverse=True)
         
         return jsonify({
             'predictions': predictions_data
         }), 200
     except Exception as e:
-        print(f"Error getting predictions: {str(e)}")  # 调试信息
+        print(f"Error getting predictions: {str(e)}")
         import traceback
         traceback.print_exc()
         return jsonify({'error': f'获取预测历史失败: {str(e)}'}), 500
@@ -782,16 +918,9 @@ def get_prediction(prediction_id):
         
     try:
         # 验证token
-        token = request.headers.get('Authorization')
-        if not token:
-            return jsonify({'error': '没有提供token'}), 401
-        try:
-            data = jwt.decode(token.split(' ')[1], SECRET_KEY, algorithms=['HS256'])
-            current_user = User.query.get(data['user_id'])
-            if not current_user:
-                return jsonify({'error': '用户不存在'}), 401
-        except:
-            return jsonify({'error': 'token无效或已过期'}), 401
+        verify_jwt_in_request()  # 添加此行来验证 JWT token
+        current_user_id = get_jwt_identity()
+        print(f"获取预测结果，用户ID: {current_user_id}, 预测ID: {prediction_id}")
 
         prediction = Prediction.query.get_or_404(prediction_id)
         dataset = Dataset.query.get(prediction.dataset_id)
@@ -799,7 +928,7 @@ def get_prediction(prediction_id):
         if not dataset:
             return jsonify({'error': '找不到相关数据集'}), 404
             
-        if dataset.user_id != current_user.id:
+        if dataset.user_id != current_user_id:
             return jsonify({'error': '无权访问此预测任务'}), 403
             
         result = json.loads(prediction.result) if prediction.result else {}
@@ -810,8 +939,9 @@ def get_prediction(prediction_id):
             'dataset_id': prediction.dataset_id,
             'dataset_name': dataset.filename if dataset else 'Unknown',
             'model': parameters.get('model', 'Unknown'),
+            'parameters': parameters,
             'status': result.get('status', 'unknown'),
-            'created_at': prediction.prediction_time.strftime('%Y-%m-%d %H:%M:%S'),
+            'created_at': format_datetime(prediction.prediction_time),
             'result': result
         }), 200
     except Exception as e:
@@ -826,16 +956,9 @@ def predict():
         
     try:
         # 验证token
-        token = request.headers.get('Authorization')
-        if not token:
-            return jsonify({'error': '没有提供token'}), 401
-        try:
-            data = jwt.decode(token.split(' ')[1], SECRET_KEY, algorithms=['HS256'])
-            current_user = User.query.get(data['user_id'])
-            if not current_user:
-                return jsonify({'error': '用户不存在'}), 401
-        except:
-            return jsonify({'error': 'token无效或已过期'}), 401
+        verify_jwt_in_request()  # 添加此行来验证 JWT token
+        current_user_id = get_jwt_identity()
+        print(f"开始预测，用户ID: {current_user_id}")
 
         data = request.get_json()
         print("预测请求数据:", data)
@@ -848,9 +971,14 @@ def predict():
             return jsonify({'error': '请选择数据集'}), 400
         
         dataset = Dataset.query.get_or_404(dataset_id)
-        if dataset.user_id != current_user.id:
+        if dataset.user_id != current_user_id:
             return jsonify({'error': '无权访问此数据集'}), 403
         
+        # 检查是否已有正在进行的预测任务
+        existing_prediction = Prediction.query.filter_by(dataset_id=dataset_id).order_by(Prediction.prediction_time.desc()).first()
+        if existing_prediction and json.loads(existing_prediction.result).get('status') == 'pending':
+            return jsonify({'error': '该数据集已有正在进行的预测任务'}), 400
+
         # 将数据集保存为临时文件
         df = pd.read_json(dataset.data)
         temp_file_path = f'temp_{dataset_id}.csv'
@@ -858,12 +986,15 @@ def predict():
         
         # 创建预测记录
         model_name = data.get('model_name', 'TimeXer6')  # 默认使用TimeXer6
+        print("预测模型: ", model_name)
         pred_len = 6  # 默认预测长度
         
         # 根据选择的模型设置预测长度
         if model_name == 'TimeXer12':
+            print("预测时长: 12小时")
             pred_len = 12
         elif model_name == 'TimeXer24':
+            print("预测时长: 24小时")
             pred_len = 24
             
         parameters = {
@@ -888,6 +1019,7 @@ def predict():
             target=run_prediction_task,
             args=(temp_file_path, model_name, prediction.id)
         )
+        thread.daemon = True  # 设置为守护线程
         thread.start()
         
         return jsonify({
@@ -897,6 +1029,8 @@ def predict():
         
     except Exception as e:
         print(f"预测时出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': f'预测失败: {str(e)}'}), 500
 
 def fix_old_predictions():
@@ -917,10 +1051,14 @@ def fix_old_predictions():
 
 # 删除预测结果
 @app.route('/predictions/<int:prediction_id>', methods=['DELETE'])
-@token_required
-def delete_prediction(current_user, prediction_id):
+@jwt_required()
+def delete_prediction(prediction_id):
     """删除指定的预测结果"""
     try:
+        # 获取当前用户ID
+        current_user_id = get_jwt_identity()
+        print(f"删除预测结果，用户ID: {current_user_id}, 预测ID: {prediction_id}")
+        
         # 获取预测记录
         prediction = Prediction.query.get_or_404(prediction_id)
         dataset = Dataset.query.get(prediction.dataset_id)
@@ -928,7 +1066,7 @@ def delete_prediction(current_user, prediction_id):
         if not dataset:
             return jsonify({'error': '找不到相关数据集'}), 404
             
-        if dataset.user_id != current_user.id:
+        if dataset.user_id != current_user_id:
             return jsonify({'error': '无权删除此预测结果'}), 403
         
         # 删除相关的图片文件
@@ -976,7 +1114,462 @@ def delete_prediction(current_user, prediction_id):
         db.session.rollback()
         return jsonify({'error': f'删除失败: {str(e)}'}), 500
 
+# 获取特定特征的预测结果数据
+@app.route('/prediction_data/<dataset_id>/<int:feature_index>', methods=['GET'])
+@jwt_required()
+def get_feature_prediction_data(dataset_id, feature_index):
+    """获取指定数据集和特征的预测结果数据"""
+    try:
+        # 获取当前用户ID
+        current_user_id = get_jwt_identity()
+        print(f"获取预测结果数据，用户ID: {current_user_id}, 数据集ID: {dataset_id}, 特征索引: {feature_index}")
+        
+        # 验证用户是否有权限访问该数据集
+        dataset = Dataset.query.get_or_404(dataset_id)
+        if dataset.user_id != current_user_id:
+            return jsonify({'error': '无权访问此数据集'}), 403
+
+        # 获取预测结果数据
+        results = PredictionResult.query.filter_by(
+            dataset_name=str(dataset_id),
+            feature_index=feature_index
+        ).order_by(PredictionResult.time).all()
+        
+        if not results:
+            return jsonify({'error': '未找到预测数据'}), 404
+            
+        # 将结果转换为列表格式
+        data = [{
+            'time': result.time,
+            'prediction': result.prediction,
+            'groundtruth': result.actual,
+            'error': result.error
+        } for result in results]
+            
+        feature_names = {
+            0: 'HUFL (高压用电负荷)',
+            1: 'MUFL (中压用电负荷)',
+            2: 'LUFL (低压用电负荷)'
+        }
+            
+        return jsonify({
+            'status': 'success',
+            'feature_name': feature_names.get(feature_index, f'特征 {feature_index}'),
+            'data': data
+        })
+        
+    except Exception as e:
+        print(f"获取预测结果数据时出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+# 获取所有特征的预测结果数据
+@app.route('/prediction_data/<dataset_id>/all', methods=['GET'])
+@jwt_required()
+def get_all_features_prediction_data(dataset_id):
+    """获取指定数据集的所有特征预测结果数据"""
+    try:
+        # 获取当前用户ID
+        current_user_id = get_jwt_identity()
+        print(f"获取所有特征预测结果数据，用户ID: {current_user_id}, 数据集ID: {dataset_id}")
+        
+        # 验证用户是否有权限访问该数据集
+        dataset = Dataset.query.get_or_404(dataset_id)
+        if dataset.user_id != current_user_id:
+            return jsonify({'error': '无权访问此数据集'}), 403
+
+        feature_names = {
+            0: 'HUFL (高压用电负荷)',
+            1: 'MUFL (中压用电负荷)',
+            2: 'LUFL (低压用电负荷)'
+        }
+        
+        # 获取所有特征的预测结果
+        all_features_data = {}
+        for feature_index in range(3):
+            results = PredictionResult.query.filter_by(
+                dataset_name=str(dataset_id),
+                feature_index=feature_index
+            ).order_by(PredictionResult.time).all()
+            
+            if results:
+                data = [{
+                    'time': result.time,
+                    'prediction': result.prediction,
+                    'groundtruth': result.actual,
+                    'error': result.error
+                } for result in results]
+                
+                all_features_data[feature_index] = {
+                    'feature_name': feature_names.get(feature_index, f'特征 {feature_index}'),
+                    'data': data
+                }
+            
+        if not all_features_data:
+            return jsonify({'error': '未找到预测数据'}), 404
+            
+        return jsonify({
+            'status': 'success',
+            'features': all_features_data
+        })
+        
+    except Exception as e:
+        print(f"获取所有特征预测结果数据时出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+# 批量删除某个数据集下的所有预测结果
+@app.route('/predictions/dataset/<int:dataset_id>', methods=['DELETE'])
+@jwt_required()
+def delete_predictions_by_dataset(dataset_id):
+    try:
+        current_user_id = get_jwt_identity()
+        dataset = Dataset.query.get_or_404(dataset_id)
+        if dataset.user_id != current_user_id:
+            return jsonify({'error': '无权删除此数据集的预测结果'}), 403
+        predictions = Prediction.query.filter_by(dataset_id=dataset_id).all()
+        for pred in predictions:
+            db.session.delete(pred)
+        db.session.commit()
+        return jsonify({'message': '该数据集下所有预测结果已删除'}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'删除失败: {str(e)}'}), 500
+
+# 删除预测结果文件夹（即删除 results 目录下对应数据集的文件夹）
+@app.route('/predictions/folder/<int:dataset_id>', methods=['DELETE'])
+@jwt_required()
+def delete_prediction_folder(dataset_id):
+    try:
+        current_user_id = get_jwt_identity()
+        dataset = Dataset.query.get_or_404(dataset_id)
+        if dataset.user_id != current_user_id:
+            return jsonify({'error': '无权删除此数据集的预测结果文件夹'}), 403
+        results_dir = os.path.join(RESULTS_DIR, str(dataset_id))
+        if os.path.exists(results_dir):
+            shutil.rmtree(results_dir)
+            return jsonify({'message': '预测结果文件夹已删除'}), 200
+        else:
+            return jsonify({'message': '预测结果文件夹不存在'}), 200
+    except Exception as e:
+        return jsonify({'error': f'删除失败: {str(e)}'}), 500
+
+@app.errorhandler(NoAuthorizationError)
+def handle_no_auth_error(e):
+    print(f"JWT 授权失败: {str(e)}")
+    return jsonify({'error': 'JWT 授权失败，请重新登录'}), 401
+
+# ====== 清空 prediction_results 表 ======
+@app.route('/clear_prediction_results', methods=['POST'])
+def clear_prediction_results():
+    try:
+        num_deleted = PredictionResult.query.delete()
+        db.session.commit()
+        return {'message': f'已清空prediction_results表，删除记录数：{num_deleted}'}, 200
+    except Exception as e:
+        db.session.rollback()
+        return {'error': str(e)}, 500
+
+# 获取数据集前5行预览
+@app.route('/datasets/<int:dataset_id>/preview', methods=['GET'])
+@jwt_required()
+def get_dataset_preview(dataset_id):
+    try:
+        current_user_id = get_jwt_identity()
+        dataset = Dataset.query.filter_by(id=dataset_id, user_id=current_user_id).first()
+        if not dataset:
+            return jsonify({'error': '数据集不存在'}), 404
+        if not dataset.data:
+            return jsonify({'error': '数据集内容为空'}), 400
+        try:
+            df = pd.read_json(dataset.data)
+        except Exception as e:
+            return jsonify({'error': f'数据解析失败: {str(e)}'}), 400
+        preview = df.head(5).to_dict(orient='records')
+        return jsonify({'preview': preview}), 200
+    except Exception as e:
+        print(f"获取数据集预览时出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'获取数据集预览失败: {str(e)}'}), 500
+
+# 新增接口：获取指定预测（子目录）下的图片
+@app.route('/prediction_images_by_prediction/<int:dataset_id>/<string:sub_dir>', methods=['GET'])
+@jwt_required()
+def get_prediction_images_by_prediction(dataset_id, sub_dir):
+    """只获取指定预测（子目录）下的图片"""
+    try:
+        current_user_id = get_jwt_identity()
+        dataset = Dataset.query.get_or_404(dataset_id)
+        if dataset.user_id != current_user_id:
+            return jsonify({'error': '无权访问此数据集'}), 403
+        # 构建子目录路径
+        sub_dir_path = os.path.join(RESULTS_DIR, str(dataset_id), sub_dir)
+        images = []
+        if os.path.exists(sub_dir_path):
+            for file in os.listdir(sub_dir_path):
+                if file.endswith('.png'):
+                    images.append(file)
+            images.sort(reverse=True)
+        return jsonify({'images': images, 'sub_dir': sub_dir}), 200
+    except Exception as e:
+        print(f"获取指定预测图片失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/comments', methods=['GET'])
+def get_comments():
+    comments = Comment.query.order_by(Comment.created_at.asc()).all()
+    def build_tree(parent_id=None):
+        nodes = []
+        for c in comments:
+            if c.parent_id == parent_id:
+                node = {
+                    'id': c.id,
+                    'user_id': c.user_id,
+                    'username': c.username,
+                    'content': c.content,
+                    'created_at': c.created_at.isoformat(),
+                    'parent_id': c.parent_id,
+                    'children': build_tree(c.id)
+                }
+                nodes.append(node)
+        return nodes
+    return jsonify(build_tree(None))
+
+@app.route('/comments', methods=['POST'])
+@jwt_required()
+def add_comment():
+    data = request.json
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    content = data.get('content', '').strip()
+    if not content:
+        return jsonify({'error': '反馈内容不能为空'}), 400
+    comment = Comment(user_id=user_id, username=user.username, content=content)
+    db.session.add(comment)
+    db.session.commit()
+    return jsonify({'message': '评论成功'})
+
+@app.route('/comments/<int:comment_id>', methods=['DELETE'])
+@jwt_required()
+def delete_comment(comment_id):
+    user_id = get_jwt_identity()
+    comment = Comment.query.get_or_404(comment_id)
+    user = User.query.get(user_id)
+    if comment.user_id != user_id and not user.is_admin:
+        return jsonify({'error': '只能删除自己的评论'}), 403
+    # 递归删除所有子评论
+    def delete_children(parent):
+        children = Comment.query.filter_by(parent_id=parent.id).all()
+        for child in children:
+            delete_children(child)
+            db.session.delete(child)
+    delete_children(comment)
+    db.session.delete(comment)
+    db.session.commit()
+    return jsonify({'message': '评论已删除'})
+
+@app.route('/comments/reply', methods=['POST'])
+@jwt_required()
+def reply_comment():
+    data = request.json
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+    content = data.get('content', '').strip()
+    parent_id = data.get('parent_id')
+    if not content:
+        return jsonify({'error': '回复内容不能为空'}), 400
+    parent_comment = Comment.query.get(parent_id)
+    if not parent_comment:
+        return jsonify({'error': '父评论不存在'}), 404
+    comment = Comment(user_id=user_id, username=user.username, content=content, parent_id=parent_id)
+    db.session.add(comment)
+    db.session.commit()
+    return jsonify({'message': '回复成功'})
+
+@app.route('/user/info', methods=['GET'])
+@jwt_required()
+def get_user_info():
+    """获取当前登录用户的信息"""
+    try:
+        current_user_id = get_jwt_identity()
+        user = User.query.get(current_user_id)
+        
+        if not user:
+            return jsonify({'error': '用户不存在'}), 404
+            
+        return jsonify({
+            'username': user.username,
+            'email': user.email,
+            'role': 'admin' if user.is_admin else 'user',
+            'createdAt': user.created_at.isoformat() if user.created_at else None,
+            'lastLogin': user.last_login.isoformat() if user.last_login else None
+        })
+        
+    except Exception as e:
+        print(f"获取用户信息时出错: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/user/stats', methods=['GET'])
+@jwt_required()
+def get_user_stats():
+    """获取当前登录用户的统计数据"""
+    try:
+        current_user_id = get_jwt_identity()
+        
+        # 获取用户上传的数据集数量
+        datasets_count = Dataset.query.filter_by(user_id=current_user_id).count()
+        
+        # 获取用户创建的预测任务数量
+        # 首先获取用户的所有数据集ID
+        user_datasets = Dataset.query.filter_by(user_id=current_user_id).all()
+        user_dataset_ids = [ds.id for ds in user_datasets]
+        
+        # 然后查询这些数据集下的所有预测任务
+        predictions_count = 0
+        if user_dataset_ids:
+            predictions_count = Prediction.query.filter(Prediction.dataset_id.in_(user_dataset_ids)).count()
+        
+        return jsonify({
+            'datasetsCount': datasets_count,
+            'predictionsCount': predictions_count
+        })
+        
+    except Exception as e:
+        print(f"获取用户统计数据时出错: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/user/update', methods=['PUT'])
+@jwt_required()
+def update_user_info():
+    """更新当前登录用户的信息"""
+    try:
+        current_user_id = get_jwt_identity()
+        user = User.query.get(current_user_id)
+        
+        if not user:
+            return jsonify({'error': '用户不存在'}), 404
+            
+        data = request.json
+        
+        # 更新邮箱
+        if 'email' in data and data['email']:
+            # 检查邮箱是否已被其他用户使用
+            existing_user = User.query.filter(User.email == data['email'], User.id != current_user_id).first()
+            if existing_user:
+                return jsonify({'error': '该邮箱已被其他用户使用'}), 400
+            user.email = data['email']
+            
+        # 更新密码
+        if 'newPassword' in data and data.get('newPassword'):
+            # 验证旧密码
+            if not data.get('oldPassword'):
+                return jsonify({'error': '请提供当前密码'}), 400
+                
+            if not check_password_hash(user.password_hash, data['oldPassword']):
+                return jsonify({'error': '当前密码不正确'}), 400
+                
+            # 设置新密码
+            user.password_hash = generate_password_hash(data['newPassword'])
+            
+        # 保存更改
+        db.session.commit()
+        
+        return jsonify({'message': '用户信息更新成功'})
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"更新用户信息时出错: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/admin/users', methods=['GET'])
+@jwt_required()
+def admin_get_users():
+    """仅管理员可用：获取所有用户信息"""
+    current_user_id = get_jwt_identity()
+    user = User.query.get(current_user_id)
+    if not user or not user.is_admin:
+        return jsonify({'error': '无权限访问'}), 403
+
+    users = User.query.all()
+    user_list = []
+    for u in users:
+        user_list.append({
+            'id': u.id,
+            'username': u.username,
+            'email': u.email,
+            'is_admin': u.is_admin,
+            'created_at': u.created_at.isoformat() if u.created_at else None,
+            'last_login': u.last_login.isoformat() if u.last_login else None
+        })
+    return jsonify({'users': user_list})
+
+@app.route('/admin/users/<int:user_id>', methods=['DELETE'])
+@jwt_required()
+def admin_delete_user(user_id):
+    """仅管理员可用：删除指定用户"""
+    current_user_id = get_jwt_identity()
+    user = User.query.get(current_user_id)
+    if not user or not user.is_admin:
+        return jsonify({'error': '无权限操作'}), 403
+    if user_id == current_user_id:
+        return jsonify({'error': '不能删除自己'}), 400
+    target = User.query.get(user_id)
+    if not target:
+        return jsonify({'error': '用户不存在'}), 404
+    db.session.delete(target)
+    db.session.commit()
+    return jsonify({'message': '用户已删除'})
+
+@app.route('/admin/users/<int:user_id>/reset_password', methods=['POST'])
+@jwt_required()
+def admin_reset_password(user_id):
+    """仅管理员可用：重置指定用户密码"""
+    current_user_id = get_jwt_identity()
+    user = User.query.get(current_user_id)
+    if not user or not user.is_admin:
+        return jsonify({'error': '无权限操作'}), 403
+    data = request.get_json()
+    new_password = data.get('password')
+    if not new_password:
+        return jsonify({'error': '新密码不能为空'}), 400
+    target = User.query.get(user_id)
+    if not target:
+        return jsonify({'error': '用户不存在'}), 404
+    target.password_hash = generate_password_hash(new_password)
+    db.session.commit()
+    return jsonify({'message': '密码已重置'})
+
+@app.route('/admin/users/<int:user_id>/email', methods=['PUT'])
+@jwt_required()
+def admin_update_user_email(user_id):
+    """仅管理员可用：修改指定用户邮箱，允许重复"""
+    current_user_id = get_jwt_identity()
+    user = User.query.get(current_user_id)
+    if not user or not user.is_admin:
+        return jsonify({'error': '无权限操作'}), 403
+    data = request.get_json()
+    new_email = data.get('email')
+    if not new_email:
+        return jsonify({'error': '邮箱不能为空'}), 400
+    target = User.query.get(user_id)
+    if not target:
+        return jsonify({'error': '用户不存在'}), 404
+    # 允许邮箱重复，去除唯一性校验
+    target.email = new_email
+    db.session.commit()
+    return jsonify({'message': '邮箱已更新'})
+
 if __name__ == '__main__':
-    os.makedirs('uploads', exist_ok=True)
-    app.run(debug=True)
+    with app.app_context():
+        db.create_all()
+    print("Starting Flask application...")
+    print("Registered routes:")
+    for rule in app.url_map.iter_rules():
+        print(f"{rule.endpoint}: {rule.methods} {rule}")
+    app.run(debug=True, port=5000)
     fix_old_predictions() 

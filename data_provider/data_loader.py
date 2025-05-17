@@ -51,6 +51,10 @@ class Dataset_ETT_hour(Dataset):
         df_raw = pd.read_csv(os.path.join(self.root_path,
                                           self.data_path))
 
+        # 只选择HUFL、MUFL、LUFL三个特征
+        selected_features = ['HUFL', 'MUFL', 'LUFL']
+        df_raw = df_raw[['date'] + selected_features]
+
         border1s = [0, 12 * 30 * 24 - self.seq_len, 12 * 30 * 24 + 4 * 30 * 24 - self.seq_len]
         border2s = [12 * 30 * 24, 12 * 30 * 24 + 4 * 30 * 24, 12 * 30 * 24 + 8 * 30 * 24]
         border1 = border1s[self.set_type]
@@ -79,7 +83,7 @@ class Dataset_ETT_hour(Dataset):
             data_stamp = df_stamp.drop(['date'], 1).values
         elif self.timeenc == 1:
             data_stamp = time_features(pd.to_datetime(df_stamp['date'].values), freq=self.freq)
-            data_stamp = data_stamp.transpose(1, 0) 
+            data_stamp = data_stamp.transpose(1, 0)
 
         self.data_x = data[border1:border2]
         self.data_y = data[border1:border2]
@@ -239,13 +243,10 @@ class Dataset_Custom(Dataset):
         df_raw = pd.read_csv(os.path.join(self.root_path,
                                           self.data_path))
 
-        '''
-        df_raw.columns: ['date', ...(other features), target feature]
-        '''
-        cols = list(df_raw.columns)
-        cols.remove(self.target)
-        cols.remove('date')
-        df_raw = df_raw[['date'] + cols + [self.target]]
+        # 只选择HUFL、MUFL、LUFL三个特征
+        selected_features = ['HUFL', 'MUFL', 'LUFL']
+        df_raw = df_raw[['date'] + selected_features]
+        
         num_train = int(len(df_raw) * 0.7)
         num_test = int(len(df_raw) * 0.2)
         num_vali = len(df_raw) - num_train - num_test
